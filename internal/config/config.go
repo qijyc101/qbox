@@ -78,6 +78,9 @@ type TUN struct {
 	Stack         string `json:"stack"`
 	MTU           int    `json:"mtu,omitempty"`
 	StrictRoute   bool   `json:"strict_route,omitempty"`
+	// DisableIPv6 keeps the IPv6 address off the TUN interface. Some
+	// Windows installations with IPv6 disabled cannot assign one.
+	DisableIPv6 bool `json:"disable_ipv6,omitempty"`
 }
 
 // DNS holds the resolver settings.

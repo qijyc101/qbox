@@ -210,6 +210,33 @@ func TestBuildSelectedNodeFallback(t *testing.T) {
 	}
 }
 
+func TestBuildDisableIPv6(t *testing.T) {
+	cfg := sampleConfig()
+	cfg.TUN.DisableIPv6 = true
+	doc, _ := buildDoc(t, cfg, nil)
+	tun := doc["inbounds"].([]any)[0].(map[string]any)
+	addresses := tun["address"].([]any)
+	if len(addresses) != 1 || addresses[0] != "172.19.0.1/30" {
+		t.Fatalf("address = %#v", addresses)
+	}
+}
+
+func TestBuildInputDisableIPv6(t *testing.T) {
+	cfg := sampleConfig()
+	data, warnings, err := Build(Input{Config: cfg, DisableIPv6: true, CacheFile: `C:\cache\cache.db`})
+	if err != nil {
+		t.Fatalf("Build: %v (warnings %v)", err, warnings)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	tun := doc["inbounds"].([]any)[0].(map[string]any)
+	if addresses := tun["address"].([]any); len(addresses) != 1 {
+		t.Fatalf("address = %#v", addresses)
+	}
+}
+
 func TestBuildDuplicateTags(t *testing.T) {
 	cfg := sampleConfig()
 	node := cfg.Subscriptions[0].Nodes[0]

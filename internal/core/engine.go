@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	box "github.com/sagernet/sing-box"
@@ -38,6 +39,7 @@ type Engine struct {
 	mu       sync.Mutex
 	state    model.State
 	lastErr  string
+	lastWarn string
 	instance *box.Box
 	cancel   context.CancelFunc
 	traffic  *trafficcontrol.Manager
@@ -69,6 +71,20 @@ func (e *Engine) LastError() string {
 	return e.lastErr
 }
 
+// Warning returns a non-fatal warning from the last start, such as the
+// automatic IPv4-only fallback.
+func (e *Engine) Warning() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.lastWarn
+}
+
+func (e *Engine) setWarning(message string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.lastWarn = message
+}
+
 func (e *Engine) setState(state model.State, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -93,6 +109,7 @@ func (e *Engine) Start(cfg config.Config, ruleSetPaths map[string]string) error 
 	}
 
 	e.setState(model.StateStarting, nil)
+	e.setWarning("")
 
 	if e.opts.CacheFile != "" {
 		if err := os.MkdirAll(filepath.Dir(e.opts.CacheFile), 0o700); err != nil {
@@ -102,51 +119,38 @@ func (e *Engine) Start(cfg config.Config, ruleSetPaths map[string]string) error 
 	}
 
 	exe, _ := os.Executable()
-	data, warnings, err := boxconf.Build(boxconf.Input{
+	buildInput := boxconf.Input{
 		Config:       cfg,
 		RuleSetPaths: ruleSetPaths,
 		ExeName:      filepath.Base(exe),
 		CacheFile:    e.opts.CacheFile,
-	})
-	for _, warning := range warnings {
-		e.logs.WriteMessage(log.LevelWarn, warning)
+	}
+	data, warnings, err := boxconf.Build(buildInput)
+	e.logWarnings(warnings)
+	if err != nil {
+		e.setState(model.StateError, err)
+		return err
+	}
+
+	instance, cancel, traffic, err := e.launch(data)
+	if err != nil && !cfg.TUN.DisableIPv6 && isIPv6ConfigError(err) {
+		message := "Windows не смогла назначить IPv6-адрес TUN; повтор запуска без IPv6"
+		e.logs.WriteMessage(log.LevelWarn, message)
+		buildInput.DisableIPv6 = true
+		data, warnings, buildErr := boxconf.Build(buildInput)
+		e.logWarnings(warnings)
+		if buildErr == nil {
+			instance, cancel, traffic, err = e.launch(data)
+			if err == nil {
+				e.setWarning("TUN работает только по IPv4: Windows не может назначить IPv6-адрес. Проверьте утечки IPv6 или включите IPv6 в системе.")
+			}
+		}
 	}
 	if err != nil {
 		e.setState(model.StateError, err)
 		return err
 	}
 
-	ctx := include.Context(context.Background())
-	ctx, cancel := context.WithCancel(ctx)
-
-	opts, err := singjson.UnmarshalExtendedContext[option.Options](ctx, data)
-	if err != nil {
-		cancel()
-		err = fmt.Errorf("конфигурация sing-box: %w", err)
-		e.setState(model.StateError, err)
-		return err
-	}
-
-	instance, err := box.New(box.Options{
-		Context:           ctx,
-		Options:           opts,
-		PlatformLogWriter: e.logs,
-	})
-	if err != nil {
-		cancel()
-		err = fmt.Errorf("создание sing-box: %w", err)
-		e.setState(model.StateError, err)
-		return err
-	}
-	if err := instance.Start(); err != nil {
-		_ = instance.Close()
-		cancel()
-		err = fmt.Errorf("запуск sing-box: %w", err)
-		e.setState(model.StateError, err)
-		return err
-	}
-
-	traffic := service.PtrFromContext[trafficcontrol.Manager](ctx)
 	if traffic == nil {
 		e.logs.WriteMessage(log.LevelWarn, "статистика трафика недоступна")
 	}
@@ -161,6 +165,47 @@ func (e *Engine) Start(cfg config.Config, ruleSetPaths map[string]string) error 
 
 	e.logs.WriteMessage(log.LevelInfo, "qbox: подключение запущено")
 	return nil
+}
+
+func (e *Engine) logWarnings(warnings []string) {
+	for _, warning := range warnings {
+		e.logs.WriteMessage(log.LevelWarn, warning)
+	}
+}
+
+// launch parses a generated configuration and starts a sing-box instance.
+// On failure the instance closes itself and the context is cancelled.
+func (e *Engine) launch(data []byte) (*box.Box, context.CancelFunc, *trafficcontrol.Manager, error) {
+	ctx := include.Context(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
+
+	opts, err := singjson.UnmarshalExtendedContext[option.Options](ctx, data)
+	if err != nil {
+		cancel()
+		return nil, nil, nil, fmt.Errorf("конфигурация sing-box: %w", err)
+	}
+	instance, err := box.New(box.Options{
+		Context:           ctx,
+		Options:           opts,
+		PlatformLogWriter: e.logs,
+	})
+	if err != nil {
+		cancel()
+		return nil, nil, nil, fmt.Errorf("создание sing-box: %w", err)
+	}
+	if err := instance.Start(); err != nil {
+		cancel()
+		return nil, nil, nil, fmt.Errorf("запуск sing-box: %w", err)
+	}
+	traffic := service.PtrFromContext[trafficcontrol.Manager](ctx)
+	return instance, cancel, traffic, nil
+}
+
+func isIPv6ConfigError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "set ipv6 address") ||
+		strings.Contains(message, "set ipv6 dns") ||
+		strings.Contains(message, "set ipv6 options")
 }
 
 // Stop stops the running sing-box instance.

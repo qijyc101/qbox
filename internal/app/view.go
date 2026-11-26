@@ -24,7 +24,10 @@ func (a *App) view(c *ui.Context) {
 			ui.Text(c, a.notice).TextColor(t.TextMuted).FontSize(12)
 		}
 		if a.err != "" && a.page != 0 {
-			ui.Text(c, a.err).TextColor(t.Danger).FontSize(12)
+			ui.Text(c, a.err).TextColor(t.Danger).FontSize(12).Wrap()
+		}
+		if a.warn != "" {
+			ui.Text(c, a.warn).TextColor(t.Warning).FontSize(12).Wrap()
 		}
 		switch a.page {
 		case 0:
@@ -368,6 +371,7 @@ func (a *App) settingsPage(c *ui.Context) {
 		stack := a.stackIndex()
 		ui.Segmented(c, &stack, "System", "Mixed", "gVisor").FillEqually().OnChange(func() { a.setStack(stack) })
 		ui.Text(c, "Mixed требует сборки с тегом with_gvisor; System быстрее, gVisor — универсальнее.").TextColor(t.TextMuted).FontSize(12)
+		a.switchRow(c, "Отключить IPv6 в TUN", &a.cfg.TUN.DisableIPv6, "Включайте, если Windows не может назначить IPv6-адрес TUN-интерфейсу.")
 		ui.Text(c, "Имя интерфейса").TextColor(t.TextMuted).FontSize(12)
 		ui.TextInput(c, &a.cfg.TUN.InterfaceName).Label("Имя интерфейса").OnChange(a.routingChanged)
 		a.switchRow(c, "Strict route", &a.cfg.TUN.StrictRoute, "Блокирует утечки DNS и обход TUN; может ломать отдельные приложения.")

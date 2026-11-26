@@ -26,6 +26,7 @@ type Engine interface {
 	Stop() error
 	State() model.State
 	LastError() string
+	Warning() string
 	Stats() model.Stats
 	Logs() ([]model.LogEntry, uint64)
 	ClearLogs()
@@ -75,6 +76,7 @@ type App struct {
 	busyTS string
 	notice string
 	err    string
+	warn   string
 	dirty  bool
 
 	logs    []model.LogEntry
@@ -168,11 +170,12 @@ func (a *App) startPolling() {
 				stats := a.deps.Engine.Stats()
 				logs, rev := a.deps.Engine.Logs()
 				lastErr := a.deps.Engine.LastError()
+				warning := a.deps.Engine.Warning()
 				mygo.RunOnMain(func() {
 					if a.closed.Load() {
 						return
 					}
-					changed := state != a.state || stats != a.stats || rev != a.logRev
+					changed := state != a.state || stats != a.stats || rev != a.logRev || warning != a.warn
 					if !changed {
 						return
 					}
@@ -180,6 +183,7 @@ func (a *App) startPolling() {
 					a.stats = stats
 					a.logs = logs
 					a.logRev = rev
+					a.warn = warning
 					if state == model.StateError && lastErr != "" {
 						a.err = lastErr
 					}

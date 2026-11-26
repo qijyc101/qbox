@@ -57,6 +57,7 @@ func (f *fakeEngine) State() model.State {
 }
 
 func (f *fakeEngine) LastError() string { return "" }
+func (f *fakeEngine) Warning() string   { return "" }
 
 func (f *fakeEngine) Stats() model.Stats {
 	f.mu.Lock()

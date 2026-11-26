@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -62,5 +63,17 @@ func TestBoxStartsAndStops(t *testing.T) {
 	logs, _ := sink.Snapshot()
 	if len(logs) == 0 {
 		t.Error("no logs were captured")
+	}
+}
+
+func TestIsIPv6ConfigError(t *testing.T) {
+	if !isIPv6ConfigError(errors.New("start inbound/tun[tun-in]: configure tun interface: set ipv6 address: Element not found.")) {
+		t.Fatal("ipv6 address error was not recognized")
+	}
+	if !isIPv6ConfigError(errors.New("set ipv6 dns: Element not found")) {
+		t.Fatal("ipv6 dns error was not recognized")
+	}
+	if isIPv6ConfigError(errors.New("permission denied")) {
+		t.Fatal("unrelated error was recognized as IPv6")
 	}
 }

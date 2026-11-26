@@ -26,6 +26,9 @@ type Input struct {
 	RuleSetPaths map[string]string // tag -> absolute .srs path
 	ExeName      string
 	CacheFile    string
+	// DisableIPv6 forces an IPv4-only TUN interface. Used for the
+	// automatic retry when Windows refuses the IPv6 address.
+	DisableIPv6 bool
 }
 
 type document struct {
@@ -216,6 +219,11 @@ func Build(in Input) ([]byte, []string, error) {
 		dnsFinal = "remote"
 	}
 
+	addresses := []string{"172.19.0.1/30"}
+	if !cfg.TUN.DisableIPv6 && !in.DisableIPv6 {
+		addresses = append(addresses, "fdfe:dcba:9876::1/126")
+	}
+
 	doc := document{
 		Log: logOptions{
 			Level:     cfg.LogLevel,
@@ -230,7 +238,7 @@ func Build(in Input) ([]byte, []string, error) {
 			Type:          "tun",
 			Tag:           "tun-in",
 			InterfaceName: cfg.TUN.InterfaceName,
-			Address:       []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126"},
+			Address:       addresses,
 			MTU:           cfg.TUN.MTU,
 			DNSMode:       "hijack",
 			AutoRoute:     true,

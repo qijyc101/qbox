@@ -114,6 +114,13 @@ Rule-sets скачиваются с `SagerNet/sing-geosite` и `SagerNet/sing-ge
   Task Scheduler и отдельного этапа.
 - Неподписанный exe может вызывать предупреждение SmartScreen.
 
+## Если Windows не даёт назначить IPv6
+
+Ошибка `configure tun interface: set ipv6 address: Element not found`
+означает, что IPv6 отключён в системе или на адаптере. qbox автоматически
+повторяет запуск с IPv4-only TUN и показывает предупреждение. Чтобы не
+повторять попытку каждый раз, включите в настройках «Отключить IPv6 в TUN».
+
 ## Лицензия
 
 qbox — GNU GPL v3.0 или позднее, см. `LICENSE`.
