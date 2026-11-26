@@ -1,11 +1,15 @@
 package app
 
 import (
+	"bytes"
+	"image/png"
+	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/egoist/mygo"
 
+	"qbox/internal/config"
 	"qbox/internal/model"
 )
 
@@ -13,6 +17,11 @@ func (a *App) initTray() {
 	icon := readTrayIcon(a.deps.ResourcesDir)
 	if icon == nil {
 		a.notice = "Трей недоступен: не найден resources/tray.png"
+		return
+	}
+	pngConfig, err := png.DecodeConfig(bytes.NewReader(icon))
+	if err != nil || pngConfig.Width <= 0 || pngConfig.Height <= 0 || pngConfig.Width > 1024 || pngConfig.Height > 1024 {
+		a.notice = "Трей недоступен: некорректный PNG"
 		return
 	}
 
@@ -62,8 +71,20 @@ func readTrayIcon(resourcesDir string) []byte {
 		filepath.Join("resources", "tray.png"),
 		filepath.Join("resources", "icon.png"),
 	)
+	const maxIconSize = 1 << 20
 	for _, path := range candidates {
-		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		info, err := file.Stat()
+		if err != nil || info.Size() <= 0 || info.Size() > maxIconSize {
+			_ = file.Close()
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(file, maxIconSize+1))
+		_ = file.Close()
+		if err == nil && len(data) > 0 && len(data) <= maxIconSize {
 			return data
 		}
 	}
@@ -76,6 +97,9 @@ func (a *App) trayToggle() {
 	}
 	if a.state == model.StateRunning {
 		a.stop()
+		return
+	}
+	if a.workBusy {
 		return
 	}
 	a.start()
@@ -115,12 +139,19 @@ func (a *App) updateTray() {
 	case model.StateError:
 		label = "Повторить"
 	}
-	a.trayConnect.SetLabel(label)
-	a.trayConnect.SetEnabled(enabled)
-
 	tip := "qbox — " + a.stateText()
-	if a.state == model.StateRunning && a.cfg.SelectedNode != "" && a.cfg.SelectedNode != "auto" {
+	if a.state == model.StateRunning && a.cfg.Routing.Mode != config.ModeDirect &&
+		a.cfg.SelectedNode != "" && a.cfg.SelectedNode != "auto" {
 		tip += " · " + a.cfg.SelectedNode
 	}
+	if a.trayReady && label == a.trayLabel && enabled == a.trayEnabled && tip == a.trayTip {
+		return
+	}
+	a.trayConnect.SetLabel(label)
+	a.trayConnect.SetEnabled(enabled)
 	a.tray.SetToolTip(tip)
+	a.trayLabel = label
+	a.trayEnabled = enabled
+	a.trayTip = tip
+	a.trayReady = true
 }

@@ -28,9 +28,24 @@ type Client struct {
 	HTTP *http.Client
 }
 
-// NewClient returns a client with sensible timeouts.
+// NewClient returns a client with sensible timeouts. An HTTPS subscription
+// may not be redirected to plain HTTP.
 func NewClient() *Client {
-	return &Client{HTTP: &http.Client{Timeout: 30 * time.Second}}
+	return &Client{HTTP: &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+				return fmt.Errorf("перенаправление на %q запрещено", req.URL.Scheme)
+			}
+			if len(via) > 0 && via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme != "https" {
+				return errors.New("HTTPS-подписка перенаправлена на HTTP")
+			}
+			if len(via) >= 10 {
+				return errors.New("слишком много перенаправлений")
+			}
+			return nil
+		},
+	}}
 }
 
 // Fetch downloads a subscription URL.
@@ -41,7 +56,7 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("некорректный URL: %w", err)
+		return nil, errors.New("некорректный URL подписки")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("поддерживаются только http и https, получено %q", u.Scheme)
@@ -49,7 +64,7 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("некорректный URL подписки")
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "*/*")
@@ -60,6 +75,10 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			return nil, fmt.Errorf("запрос подписки: %s: %v", redactURL(urlErr.URL), urlErr.Err)
+		}
 		return nil, fmt.Errorf("запрос подписки: %w", err)
 	}
 	defer resp.Body.Close()
@@ -80,4 +99,18 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 		return nil, errors.New("сервер вернул пустой ответ")
 	}
 	return data, nil
+}
+
+// redactURL keeps only the origin of a URL for diagnostics: subscription
+// paths and query strings often contain a token.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "<url>"
+	}
+	origin := u.Scheme + "://" + u.Host
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		origin += "/…"
+	}
+	return origin
 }

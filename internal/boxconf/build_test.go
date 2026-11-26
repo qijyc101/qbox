@@ -82,12 +82,8 @@ func TestBuildRulesMode(t *testing.T) {
 	}
 
 	outbounds := doc["outbounds"].([]any)
-	if len(outbounds) != 3 {
+	if len(outbounds) != 2 {
 		t.Fatalf("outbounds = %d", len(outbounds))
-	}
-	auto := outbounds[1].(map[string]any)
-	if auto["type"] != "urltest" || auto["tag"] != "auto" {
-		t.Fatalf("auto = %#v", auto)
 	}
 
 	rs := route["rule_set"].([]any)
@@ -166,7 +162,7 @@ func TestBuildDirectMode(t *testing.T) {
 		t.Fatalf("final = %v", route["final"])
 	}
 	outbounds := doc["outbounds"].([]any)
-	if len(outbounds) != 2 {
+	if len(outbounds) != 1 {
 		t.Fatalf("outbounds = %d", len(outbounds))
 	}
 	dns := doc["dns"].(map[string]any)
@@ -177,6 +173,147 @@ func TestBuildDirectMode(t *testing.T) {
 		if rule["outbound"] == "auto" {
 			t.Fatalf("proxy rule in direct mode: %#v", rule)
 		}
+	}
+}
+
+func TestRuleOrder(t *testing.T) {
+	cfg := sampleConfig()
+	cfg.Routing.ProxyDomains = []string{"proxy.example"}
+	cfg.Routing.DirectDomains = []string{"direct.example"}
+	paths := map[string]string{
+		"geosite-ru":  `C:\rules\geosite-ru.srs`,
+		"geoip-ru":    `C:\rules\geoip-ru.srs`,
+		"geosite-ads": `C:\rules\ads.srs`,
+	}
+	doc, _ := buildDoc(t, cfg, paths)
+	list := rules(doc)
+	var order []string
+	for _, rule := range list {
+		switch {
+		case rule["action"] == "sniff":
+			order = append(order, "sniff")
+		case rule["process_name"] != nil:
+			order = append(order, "qbox")
+		case rule["action"] == "reject":
+			order = append(order, "ads")
+		case rule["ip_is_private"] == true:
+			order = append(order, "lan")
+		case rule["domain_suffix"] != nil && rule["outbound"] == "node1":
+			order = append(order, "proxy-list")
+		case rule["domain_suffix"] != nil && rule["outbound"] == "direct":
+			order = append(order, "direct-list")
+		case rule["rule_set"] != nil && rule["outbound"] == "direct":
+			order = append(order, "ru")
+		}
+	}
+	want := []string{"sniff", "qbox", "ads", "lan", "proxy-list", "direct-list", "ru"}
+	if len(order) != len(want) {
+		t.Fatalf("order = %v, want %v", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("order = %v, want %v", order, want)
+		}
+	}
+}
+
+func TestBuildInvalidDNSFallsBackToLocal(t *testing.T) {
+	cfg := sampleConfig()
+	cfg.DNS.Remote = "::not-a-url::"
+	doc, warnings := buildDoc(t, cfg, nil)
+	dns := doc["dns"].(map[string]any)
+	if dns["final"] != "local" {
+		t.Fatalf("dns final = %v", dns["final"])
+	}
+	if len(warnings) == 0 || !strings.Contains(strings.Join(warnings, "\n"), "DNS") {
+		t.Fatalf("warnings = %v", warnings)
+	}
+}
+
+func TestBuildDirectModeAllowsNoNodes(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Routing.Mode = config.ModeDirect
+	doc, _ := buildDoc(t, cfg, nil)
+	route := doc["route"].(map[string]any)
+	if route["final"] != "direct" {
+		t.Fatalf("final = %v", route["final"])
+	}
+}
+
+func TestBuildDirectModeSkipsInvalidNodes(t *testing.T) {
+	cfg := sampleConfig()
+	cfg.Routing.Mode = config.ModeDirect
+	cfg.Subscriptions[0].Nodes[0].Server = ""
+	cfg.Subscriptions[0].Nodes[0].Outbound = json.RawMessage(`null`)
+	doc, _ := buildDoc(t, cfg, nil)
+	if outbounds := doc["outbounds"].([]any); len(outbounds) != 1 {
+		t.Fatalf("outbounds = %d", len(outbounds))
+	}
+}
+
+func TestBuildGlobalIgnoresSplitRules(t *testing.T) {
+	cfg := sampleConfig()
+	cfg.Routing.Mode = config.ModeGlobal
+	cfg.Routing.ProxyDomains = []string{"openai.com"}
+	cfg.Routing.DirectDomains = []string{"example.org"}
+	paths := map[string]string{
+		"geosite-ru":  `C:\rules\geosite-ru.srs`,
+		"geoip-ru":    `C:\rules\geoip-ru.srs`,
+		"geosite-ads": `C:\rules\ads.srs`,
+	}
+	doc, _ := buildDoc(t, cfg, paths)
+
+	route := doc["route"].(map[string]any)
+	if route["final"] != "node1" {
+		t.Fatalf("final = %v", route["final"])
+	}
+	for _, rule := range rules(doc) {
+		if _, ok := rule["domain_suffix"]; ok {
+			t.Fatalf("split domain rule leaked into Global: %#v", rule)
+		}
+		if sets, ok := rule["rule_set"].([]any); ok {
+			for _, set := range sets {
+				if set == "geosite-ru" || set == "geoip-ru" {
+					t.Fatalf("RU rule leaked into Global: %#v", rule)
+				}
+			}
+		}
+	}
+	// Ads blocking and LAN bypass still apply in Global.
+	foundAds := false
+	foundLAN := false
+	for _, rule := range rules(doc) {
+		if rule["action"] == "reject" {
+			foundAds = true
+		}
+		if rule["ip_is_private"] == true {
+			foundLAN = true
+		}
+	}
+	if !foundAds || !foundLAN {
+		t.Fatalf("ads=%v lan=%v rules=%#v", foundAds, foundLAN, rules(doc))
+	}
+	sets := route["rule_set"].([]any)
+	if len(sets) != 1 {
+		t.Fatalf("rule_set = %#v, want only ads", sets)
+	}
+}
+
+func TestBuildAutoGroup(t *testing.T) {
+	cfg := sampleConfig()
+	cfg.SelectedNode = "auto"
+	doc, _ := buildDoc(t, cfg, nil)
+	outbounds := doc["outbounds"].([]any)
+	if len(outbounds) != 3 {
+		t.Fatalf("outbounds = %d", len(outbounds))
+	}
+	auto := outbounds[1].(map[string]any)
+	if auto["type"] != "urltest" || auto["tag"] != "auto" {
+		t.Fatalf("auto = %#v", auto)
+	}
+	route := doc["route"].(map[string]any)
+	if route["final"] != "auto" {
+		t.Fatalf("final = %v", route["final"])
 	}
 }
 
@@ -219,6 +356,13 @@ func TestBuildDisableIPv6(t *testing.T) {
 	if len(addresses) != 1 || addresses[0] != "172.19.0.1/30" {
 		t.Fatalf("address = %#v", addresses)
 	}
+	if tun["strict_route"] != true {
+		t.Fatalf("strict_route = %v", tun["strict_route"])
+	}
+	dns := doc["dns"].(map[string]any)
+	if dns["strategy"] != "ipv4_only" {
+		t.Fatalf("dns strategy = %v", dns["strategy"])
+	}
 }
 
 func TestBuildInputDisableIPv6(t *testing.T) {
@@ -234,6 +378,9 @@ func TestBuildInputDisableIPv6(t *testing.T) {
 	tun := doc["inbounds"].([]any)[0].(map[string]any)
 	if addresses := tun["address"].([]any); len(addresses) != 1 {
 		t.Fatalf("address = %#v", addresses)
+	}
+	if tun["strict_route"] != true {
+		t.Fatalf("strict_route = %v", tun["strict_route"])
 	}
 }
 

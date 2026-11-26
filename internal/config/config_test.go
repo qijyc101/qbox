@@ -28,6 +28,34 @@ func TestDefaultsNormalize(t *testing.T) {
 	}
 }
 
+func TestNormalizeRepairsTUNSettings(t *testing.T) {
+	cfg := Defaults()
+	cfg.TUN.InterfaceName = "qbox/x"
+	cfg.TUN.MTU = 100
+	cfg.Normalize()
+	if cfg.TUN.InterfaceName != Defaults().TUN.InterfaceName {
+		t.Fatalf("interface name = %q", cfg.TUN.InterfaceName)
+	}
+	if cfg.TUN.MTU != Defaults().TUN.MTU {
+		t.Fatalf("mtu = %d", cfg.TUN.MTU)
+	}
+
+	cfg = Defaults()
+	cfg.TUN.DisableIPv6 = true
+	cfg.TUN.MTU = 1000
+	cfg.Normalize()
+	if cfg.TUN.MTU != 1000 {
+		t.Fatalf("ipv4-only mtu = %d", cfg.TUN.MTU)
+	}
+
+	cfg = Defaults()
+	cfg.TUN.MTU = 1000
+	cfg.Normalize()
+	if cfg.TUN.MTU != Defaults().TUN.MTU {
+		t.Fatalf("mtu with ipv6 = %d", cfg.TUN.MTU)
+	}
+}
+
 func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStore(dir)
@@ -95,6 +123,72 @@ func TestCorruptFallsBackToBackup(t *testing.T) {
 	}
 	if loaded.LogLevel != "debug" {
 		t.Fatalf("backup not used, log level = %q", loaded.LogLevel)
+	}
+}
+
+func TestOversizeConfigFallsBackToBackup(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := NewStore(dir)
+	cfg := Defaults()
+	cfg.LogLevel = "debug"
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.LogLevel = "trace"
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	file, err := os.Create(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxConfigSize + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	_ = file.Close()
+
+	loaded, err := store.Load()
+	if err == nil {
+		t.Fatal("expected a warning for the oversized config")
+	}
+	if loaded.LogLevel != "debug" {
+		t.Fatalf("backup not used, log level = %q", loaded.LogLevel)
+	}
+}
+
+func TestSaveKeepsGoodBackupWhenPrimaryCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := NewStore(dir)
+	cfg := Defaults()
+	cfg.LogLevel = "debug"
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.LogLevel = "trace"
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.LogLevel = "info"
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	backupData, err := os.ReadFile(filepath.Join(dir, "config.json.bak"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var backup Config
+	if err := json.Unmarshal(backupData, &backup); err != nil {
+		t.Fatal(err)
+	}
+	if backup.LogLevel != "debug" {
+		t.Fatalf("backup was clobbered: %q", backup.LogLevel)
 	}
 }
 

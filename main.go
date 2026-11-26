@@ -4,18 +4,31 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/egoist/mygo"
 
 	"qbox/internal/app"
 	"qbox/internal/config"
 	"qbox/internal/core"
+	"qbox/internal/platform"
 	"qbox/internal/rulesets"
 	"qbox/internal/subscription"
 )
 
 func main() {
 	mygo.App.SetName("qbox")
+
+	if pid, ok := waitPIDArg(); ok {
+		// An elevated relaunch must not forward its command line to the old,
+		// unequal instance: wait for it to release the single-instance lock.
+		_ = platform.WaitForProcessExit(pid, 10*time.Second)
+	}
+	if !mygo.App.RequestSingleInstanceLock() {
+		return
+	}
 
 	dir, err := config.DefaultDir()
 	if err != nil {
@@ -63,9 +76,6 @@ func main() {
 
 	instance := app.New(deps)
 
-	if !mygo.App.RequestSingleInstanceLock() {
-		return
-	}
 	mygo.App.OnSecondInstance(func([]string, string) {
 		instance.ShowWindow()
 	})
@@ -86,4 +96,18 @@ func hasArg(want string) bool {
 		}
 	}
 	return false
+}
+
+func waitPIDArg() (int, bool) {
+	const prefix = "--wait-pid="
+	for _, arg := range os.Args[1:] {
+		if !strings.HasPrefix(arg, prefix) {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimPrefix(arg, prefix))
+		if err == nil && pid > 0 {
+			return pid, true
+		}
+	}
+	return 0, false
 }

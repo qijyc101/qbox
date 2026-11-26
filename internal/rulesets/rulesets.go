@@ -4,6 +4,7 @@ package rulesets
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"errors"
 	"fmt"
@@ -11,9 +12,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	C "github.com/sagernet/sing-box/constant"
 )
 
 // MaxSize bounds one rule-set file.
@@ -60,32 +64,50 @@ type Status struct {
 
 // Manager owns the rule-set cache.
 type Manager struct {
-	dir   string
-	HTTP  *http.Client
-	Items []Item
-	mu    sync.Mutex
+	dir      string
+	HTTP     *http.Client
+	Items    []Item
+	mu       sync.RWMutex
+	updateMu sync.Mutex
+	statusMu sync.Mutex
+	status   []Status
 }
 
 // New creates a manager storing files under dir.
 func New(dir string) *Manager {
-	return &Manager{
-		dir:   dir,
-		HTTP:  &http.Client{Timeout: 90 * time.Second},
+	m := &Manager{
+		dir: dir,
+		HTTP: &http.Client{
+			Timeout: 90 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if req.URL.Scheme != "https" {
+					return errors.New("rule-set перенаправлен на не-HTTPS URL")
+				}
+				if len(via) >= 10 {
+					return errors.New("слишком много перенаправлений")
+				}
+				return nil
+			},
+		},
 		Items: Items,
 	}
+	m.refreshStatus()
+	return m
 }
 
 // Dir returns the cache directory.
 func (m *Manager) Dir() string { return m.dir }
 
 func (m *Manager) items() []Item {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if len(m.Items) == 0 {
 		return Items
 	}
-	return m.Items
+	return slices.Clone(m.Items)
 }
 
-// Path returns the path of an installed rule-set.
+// Path returns the path of an installed, fully valid rule-set.
 func (m *Manager) Path(tag string) (string, bool) {
 	item, ok := m.itemByTag(tag)
 	if !ok {
@@ -93,16 +115,11 @@ func (m *Manager) Path(tag string) (string, bool) {
 	}
 	path := filepath.Join(m.dir, item.File)
 	info, err := os.Stat(path)
-	if err != nil || info.Size() == 0 {
+	if err != nil || info.Size() <= 0 || info.Size() > MaxSize {
 		return "", false
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return "", false
-	}
-	defer file.Close()
-	var magic [3]byte
-	if _, err := io.ReadFull(file, magic[:]); err != nil || string(magic[:]) != "SRS" {
+	data, err := os.ReadFile(path)
+	if err != nil || int64(len(data)) > MaxSize || validateSRS(data) != nil {
 		return "", false
 	}
 	return path, true
@@ -119,30 +136,50 @@ func (m *Manager) Paths() map[string]string {
 	return out
 }
 
-// Status returns the state of every known rule-set.
+// SetItems replaces the known rule-sets, for tests or custom catalogs.
+func (m *Manager) SetItems(items []Item) {
+	m.mu.Lock()
+	m.Items = items
+	m.mu.Unlock()
+	m.refreshStatus()
+}
+
+// Status returns the state of every known rule-set without touching the
+// filesystem on the caller's thread.
 func (m *Manager) Status() []Status {
+	m.statusMu.Lock()
+	defer m.statusMu.Unlock()
+	out := make([]Status, len(m.status))
+	copy(out, m.status)
+	return out
+}
+
+func (m *Manager) refreshStatus() {
 	out := make([]Status, 0, len(m.items()))
 	for _, item := range m.items() {
 		st := Status{Tag: item.Tag, Title: item.Title}
 		path := filepath.Join(m.dir, item.File)
 		if info, err := os.Stat(path); err == nil {
-			st.Installed = info.Size() > 0
 			st.Size = info.Size()
 			st.Updated = info.ModTime()
 		}
-		if _, ok := m.Path(item.Tag); !ok {
-			st.Installed = false
+		if _, ok := m.Path(item.Tag); ok {
+			st.Installed = true
+		} else {
+			st.Size = 0
 		}
 		out = append(out, st)
 	}
-	return out
+	m.statusMu.Lock()
+	m.status = out
+	m.statusMu.Unlock()
 }
 
 // Update downloads the given tags, or every rule-set when tags is empty.
 // A 304 response keeps the existing file.
 func (m *Manager) Update(ctx context.Context, tags ...string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.updateMu.Lock()
+	defer m.updateMu.Unlock()
 
 	if err := os.MkdirAll(m.dir, 0o700); err != nil {
 		return err
@@ -166,6 +203,7 @@ func (m *Manager) Update(ctx context.Context, tags ...string) error {
 			errs = append(errs, fmt.Errorf("%s: %w", item.Tag, err))
 		}
 	}
+	m.refreshStatus()
 	return errors.Join(errs...)
 }
 
@@ -179,8 +217,10 @@ func (m *Manager) download(ctx context.Context, item Item) error {
 
 	target := filepath.Join(m.dir, item.File)
 	etagPath := target + ".etag"
-	if etag, err := os.ReadFile(etagPath); err == nil && len(bytes.TrimSpace(etag)) > 0 {
-		req.Header.Set("If-None-Match", strings.TrimSpace(string(etag)))
+	if _, valid := m.Path(item.Tag); valid {
+		if etag, err := readETag(etagPath); err == nil {
+			req.Header.Set("If-None-Match", etag)
+		}
 	}
 
 	client := m.HTTP
@@ -193,7 +233,11 @@ func (m *Manager) download(ctx context.Context, item Item) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotModified {
-		return nil
+		if _, valid := m.Path(item.Tag); valid {
+			return nil
+		}
+		_ = os.Remove(etagPath)
+		return errors.New("сервер вернул 304, но локальный rule-set отсутствует или повреждён")
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("сервер вернул %s", resp.Status)
@@ -206,8 +250,8 @@ func (m *Manager) download(ctx context.Context, item Item) error {
 	if len(data) > MaxSize {
 		return fmt.Errorf("файл больше %d МБ", MaxSize>>20)
 	}
-	if len(data) < 4 || !bytes.HasPrefix(data, []byte("SRS")) {
-		return errors.New("файл не похож на бинарный rule-set sing-box")
+	if err := validateSRS(data); err != nil {
+		return fmt.Errorf("файл не похож на бинарный rule-set sing-box: %w", err)
 	}
 
 	tmp, err := os.CreateTemp(m.dir, ".ruleset-*.tmp")
@@ -230,12 +274,44 @@ func (m *Manager) download(ctx context.Context, item Item) error {
 	if err := os.Rename(tmpName, target); err != nil {
 		return err
 	}
-	if etag := resp.Header.Get("ETag"); etag != "" {
+	if etag := cleanETag(resp.Header.Get("ETag")); etag != "" {
 		_ = os.WriteFile(etagPath, []byte(etag), 0o600)
 	} else {
 		_ = os.Remove(etagPath)
 	}
 	return nil
+}
+
+func readETag(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Size() <= 0 || info.Size() > 256 {
+		return "", errors.New("некорректный ETag")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	etag := cleanETag(string(data))
+	if etag == "" {
+		return "", errors.New("некорректный ETag")
+	}
+	return etag, nil
+}
+
+func cleanETag(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 256 {
+		return ""
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return ""
+		}
+	}
+	return value
 }
 
 func (m *Manager) itemByTag(tag string) (Item, bool) {
@@ -245,4 +321,28 @@ func (m *Manager) itemByTag(tag string) (Item, bool) {
 		}
 	}
 	return Item{}, false
+}
+
+func validateSRS(data []byte) error {
+	if len(data) < 5 || !bytes.HasPrefix(data, []byte("SRS")) {
+		return errors.New("неверная сигнатура")
+	}
+	version := data[3]
+	if version == 0 || version > C.RuleSetVersionCurrent {
+		return fmt.Errorf("неподдерживаемая версия %d", version)
+	}
+	reader, err := zlib.NewReader(bytes.NewReader(data[4:]))
+	if err != nil {
+		return err
+	}
+	const maxDecompressed = 256 << 20
+	copied, copyErr := io.Copy(io.Discard, io.LimitReader(reader, maxDecompressed+1))
+	closeErr := reader.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if copied > maxDecompressed {
+		return fmt.Errorf("распакованный rule-set больше %d МБ", maxDecompressed>>20)
+	}
+	return closeErr
 }

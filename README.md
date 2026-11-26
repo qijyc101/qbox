@@ -45,19 +45,15 @@ go tool mygo build -platform windows/amd64 -skip-installer
 Без `with_gvisor` не будет mixed-стека TUN, без `with_quic` — Hysteria2/TUIC,
 без `with_utls` — uTLS/REALITY.
 
-Результат: `build/windows-amd64/qbox.exe` и `wintun.dll` рядом с ним.
+Результат: `build/windows-amd64/qbox.exe`. Отдельный `wintun.dll` не нужен:
+sing-tun встраивает официальный Wintun и загружает его из памяти.
 
 ## Wintun
 
-Официальные подписанные DLL Wintun 0.14.1 уже лежат в
-`resources/windows-amd64` и `resources/windows-arm64`. Обновить их:
-
-```powershell
-.\scripts\fetch-wintun.ps1
-```
-
-`wintun.dll` загружается до старта sing-box по полному пути из ресурсов,
-поэтому sing-tun находит его без копирования в системные каталоги.
+Пакет `sing-tun` (зависимость sing-box) содержит официальный подписанный
+Wintun 0.14.1 и загружает его через `memmod`, без поиска DLL в каталоге
+приложения. Это исключает подмену `wintun.dll` рядом с qbox.exe. Копия
+лицензии Wintun — `third_party/wintun/LICENSE.txt`.
 
 ## Запуск
 
@@ -76,7 +72,7 @@ go tool mygo build -platform windows/amd64 -skip-installer
 
 «Серверы» → «Пинг всех»: для каждой ноды поднимается временный sing-box
 без TUN и выполняется реальное TCP-соединение через протокол ноды к
-`www.gstatic.com:443`. Задержки появляются по мере проверки; пока идёт
+`1.1.1.1:443`. Задержки появляются по мере проверки; пока идёт
 тест, кнопка показывает прогресс и позволяет отменить его. Для каждой ноды
 есть таймаут 6 с и общий watchdog 12 с. Причина ошибки пишется в журнал.
 Пинг работает и без активного подключения.
@@ -86,9 +82,10 @@ go tool mygo build -platform windows/amd64 -skip-installer
 
 ## Маршрутизация
 
-- **Global** — весь трафик через выбранную ноду.
+- **Global** — финальный маршрут через ноду; LAN и блокировка рекламы
+  действуют по настройкам, списки и обход РФ игнорируются.
 - **Rules** — правила и списки, финальный маршрут через ноду.
-- **Direct** — без прокси, системный DNS.
+- **Direct** — без прокси; TUN, DNS hijack, LAN и adblock продолжают работать.
 
 Порядок правил: sniff → трафик самого qbox напрямую → блокировка рекламы →
 LAN напрямую → свои proxy-списки → свои direct-списки → обход РФ → финальный
@@ -117,6 +114,14 @@ Rule-sets скачиваются с `SagerNet/sing-geosite` и `SagerNet/sing-ge
 Скрипт прогоняет unit-тесты, `go vet`, `mygo vet`, а тест UI собирает в
 `build/test` и запускает оттуда (в некоторых конфигурациях Windows Defender
 блокирует тестовый exe в `%TEMP%`).
+
+Статический анализ и проверка уязвимостей:
+
+```powershell
+.\scripts\check.ps1
+```
+
+CI (`.github/workflows/ci.yml`) выполняет те же шаги на Windows.
 
 Проверка TUN выполняется вручную на машине с правами администратора и
 реальной подпиской: IP/DNS-leak, LAN, обход РФ, adblock, смена ноды.

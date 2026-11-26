@@ -42,10 +42,10 @@ Wintun
 Copyright (C) 2017-2021 WireGuard LLC
 https://www.wintun.net/
 
-The official prebuilt, signed wintun.dll files are redistributed unmodified
-alongside qbox under the license included in the official Wintun 0.14.1
-archive; a copy is in third_party/wintun/LICENSE.txt. They are used only
-through the documented Wintun API by sing-tun.
+The official prebuilt, signed Wintun 0.14.1 binary is embedded in the
+sing-tun module and loaded from memory; qbox does not ship a sidecar DLL.
+The Wintun license is preserved in third_party/wintun/LICENSE.txt. It is
+used only through the documented Wintun API by sing-tun.
 
 Rule-set data
 -------------

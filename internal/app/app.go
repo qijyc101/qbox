@@ -23,14 +23,17 @@ import (
 // Engine is the part of the core the UI needs.
 type Engine interface {
 	Start(config.Config, map[string]string) error
+	Restart(config.Config, map[string]string) error
 	Stop() error
 	State() model.State
 	LastError() string
 	Warning() string
 	Stats() model.Stats
 	Logs() ([]model.LogEntry, uint64)
+	LogRevision() uint64
 	ClearLogs()
 	Ping(context.Context, []config.Node) <-chan model.PingResult
+	Close()
 }
 
 // Fetcher downloads a subscription.
@@ -70,15 +73,18 @@ type App struct {
 	closed atomic.Bool
 	save   *time.Timer
 
-	page   int
-	state  model.State
-	stats  model.Stats
-	busy   bool
-	busyTS string
-	notice string
-	err    string
-	warn   string
-	dirty  bool
+	page     int
+	state    model.State
+	stats    model.Stats
+	busy     bool
+	busyTS   string
+	workBusy bool
+	workTS   string
+	notice   string
+	err      string
+	warn     string
+	dirty    bool
+	cfgRev   int
 
 	logs    []model.LogEntry
 	logRev  uint64
@@ -91,10 +97,19 @@ type App struct {
 	pingDone   int
 	pingTotal  int
 
-	tray        *mygo.Tray
-	trayConnect *mygo.MenuItem
-	trayHint    bool
-	quitting    bool
+	fetchCancel context.CancelFunc
+	rsCancel    context.CancelFunc
+
+	tray         *mygo.Tray
+	trayConnect  *mygo.MenuItem
+	trayHint     bool
+	trayReady    bool
+	trayLabel    string
+	trayTip      string
+	trayEnabled  bool
+	quitting     bool
+	elevating    bool
+	elevatedFlag bool
 
 	nodeList  ui.ListState
 	logList   ui.ListState
@@ -119,12 +134,13 @@ func New(deps Deps) *App {
 	cfg.Normalize()
 
 	a := &App{
-		deps:   deps,
-		cfg:    cfg,
-		done:   make(chan struct{}),
-		state:  model.StateStopped,
-		logRev: ^uint64(0),
-		pings:  make(map[string]model.PingResult),
+		deps:         deps,
+		cfg:          cfg,
+		done:         make(chan struct{}),
+		state:        model.StateStopped,
+		logRev:       ^uint64(0),
+		pings:        make(map[string]model.PingResult),
+		elevatedFlag: deps.Elevated(),
 	}
 	a.directText = config.JoinList(cfg.Routing.DirectDomains)
 	a.directCIDRs = config.JoinList(cfg.Routing.DirectCIDRs)
@@ -138,11 +154,6 @@ func New(deps Deps) *App {
 
 // Open creates the main window and starts polling the engine.
 func (a *App) Open() {
-	if a.deps.ResourcesDir != "" {
-		if err := platform.PreloadWintun(a.deps.ResourcesDir); err != nil {
-			a.notice = err.Error()
-		}
-	}
 	a.win = mygo.NewWindow(mygo.WindowOptions{
 		Title:     "qbox",
 		Width:     1000,
@@ -190,12 +201,19 @@ func (a *App) Shutdown() {
 	if a.pingCancel != nil {
 		a.pingCancel()
 	}
+	if a.fetchCancel != nil {
+		a.fetchCancel()
+	}
+	if a.rsCancel != nil {
+		a.rsCancel()
+	}
 	a.saveNow()
-	_ = a.deps.Engine.Stop()
+	a.deps.Engine.Close()
 	if a.tray != nil {
 		a.tray.Destroy()
 		a.tray = nil
 		a.trayConnect = nil
+		a.trayReady = false
 	}
 }
 
@@ -208,29 +226,31 @@ func (a *App) startPolling() {
 			case <-a.done:
 				return
 			case <-ticker.C:
-				state := a.deps.Engine.State()
-				stats := a.deps.Engine.Stats()
-				logs, rev := a.deps.Engine.Logs()
-				lastErr := a.deps.Engine.LastError()
-				warning := a.deps.Engine.Warning()
 				mygo.RunOnMain(func() {
 					if a.closed.Load() {
 						return
 					}
-					changed := state != a.state || stats != a.stats || rev != a.logRev || warning != a.warn
+					state := a.deps.Engine.State()
+					stats := a.deps.Engine.Stats()
+					lastErr := a.deps.Engine.LastError()
+					warning := a.deps.Engine.Warning()
+					logRev := a.deps.Engine.LogRevision()
+
+					changed := state != a.state || stats != a.stats || logRev != a.logRev || warning != a.warn
 					if !changed {
 						return
 					}
 					a.state = state
 					a.stats = stats
-					a.logs = logs
-					a.logRev = rev
 					a.warn = warning
+					if logRev != a.logRev {
+						a.logs, a.logRev = a.deps.Engine.Logs()
+					}
 					if state == model.StateError && lastErr != "" {
 						a.err = lastErr
 					}
 					a.updateTray()
-					if a.win != nil {
+					if a.win != nil && a.win.IsVisible() {
 						a.win.Invalidate()
 					}
 				})
@@ -243,11 +263,17 @@ func (a *App) post(fn func()) {
 	if a.closed.Load() {
 		return
 	}
-	if a.win == nil {
+	run := func() {
+		if a.closed.Load() {
+			return
+		}
 		fn()
+	}
+	if a.win == nil {
+		run()
 		return
 	}
-	a.win.Update(fn)
+	a.win.Update(run)
 }
 
 func (a *App) saveNow() {
@@ -274,23 +300,51 @@ func (a *App) scheduleSave() {
 }
 
 func (a *App) elevated() bool {
-	return a.deps.Elevated()
+	return a.elevatedFlag
 }
 
 func (a *App) start() {
-	if a.busy || a.state == model.StateRunning || a.state == model.StateStarting {
+	if a.busy || a.workBusy || a.elevating || a.closed.Load() || a.state == model.StateRunning || a.state == model.StateStarting {
 		return
 	}
 	if !a.elevated() {
 		a.requestElevation()
 		return
 	}
+	if a.state == model.StateError {
+		a.restartNow()
+		return
+	}
 	a.startEngine()
 }
 
 func (a *App) requestElevation() {
-	a.saveNow()
-	if err := platform.RelaunchElevated("--elevated", "--autostart"); err != nil {
+	if a.elevating {
+		return
+	}
+	a.elevating = true
+	a.busy = true
+	a.busyTS = "Запрос прав администратора…"
+	a.err = ""
+	if err := a.deps.Store.Save(a.cfg); err != nil {
+		a.elevating = false
+		a.busy = false
+		a.busyTS = ""
+		a.err = "Не удалось сохранить настройки: " + err.Error()
+		if a.win != nil {
+			a.win.Invalidate()
+		}
+		return
+	}
+	args := []string{
+		"--elevated",
+		"--autostart",
+		fmt.Sprintf("--wait-pid=%d", os.Getpid()),
+	}
+	if err := platform.RelaunchElevated(args...); err != nil {
+		a.elevating = false
+		a.busy = false
+		a.busyTS = ""
 		a.err = err.Error()
 		if a.win != nil {
 			a.win.Invalidate()
@@ -301,20 +355,27 @@ func (a *App) requestElevation() {
 }
 
 func (a *App) startEngine() {
+	if a.closed.Load() {
+		return
+	}
 	a.busy = true
 	a.busyTS = "Запуск ядра…"
 	a.err = ""
 	cfg := a.cfg.Clone()
+	rev := a.cfgRev
 	paths := a.deps.RuleSets.Paths()
 	if a.win == nil {
-		a.doStart(cfg, paths)
+		a.doStart(cfg, paths, rev)
 		return
 	}
 	a.win.Invalidate()
-	go a.doStart(cfg, paths)
+	go a.doStart(cfg, paths, rev)
 }
 
-func (a *App) doStart(cfg config.Config, paths map[string]string) {
+func (a *App) doStart(cfg config.Config, paths map[string]string, rev int) {
+	if a.closed.Load() {
+		return
+	}
 	err := a.deps.Engine.Start(cfg, paths)
 
 	a.post(func() {
@@ -325,7 +386,7 @@ func (a *App) doStart(cfg config.Config, paths map[string]string) {
 		if err != nil {
 			a.err = err.Error()
 		} else {
-			a.dirty = false
+			a.dirty = rev != a.cfgRev
 			a.err = ""
 			a.notice = ""
 		}
@@ -337,7 +398,7 @@ func (a *App) doStart(cfg config.Config, paths map[string]string) {
 }
 
 func (a *App) stop() {
-	if a.busy {
+	if a.busy || a.closed.Load() {
 		return
 	}
 	a.busy = true
@@ -351,6 +412,9 @@ func (a *App) stop() {
 }
 
 func (a *App) doStop() {
+	if a.closed.Load() {
+		return
+	}
 	err := a.deps.Engine.Stop()
 	a.post(func() {
 		a.busy = false
@@ -368,24 +432,27 @@ func (a *App) doStop() {
 }
 
 func (a *App) restartNow() {
-	if a.busy {
+	if a.busy || a.workBusy || a.closed.Load() {
 		return
 	}
 	a.busy = true
 	a.busyTS = "Перезапуск ядра…"
 	cfg := a.cfg.Clone()
+	rev := a.cfgRev
 	paths := a.deps.RuleSets.Paths()
 	if a.win == nil {
-		a.doRestart(cfg, paths)
+		a.doRestart(cfg, paths, rev)
 		return
 	}
 	a.win.Invalidate()
-	go a.doRestart(cfg, paths)
+	go a.doRestart(cfg, paths, rev)
 }
 
-func (a *App) doRestart(cfg config.Config, paths map[string]string) {
-	_ = a.deps.Engine.Stop()
-	err := a.deps.Engine.Start(cfg, paths)
+func (a *App) doRestart(cfg config.Config, paths map[string]string, rev int) {
+	if a.closed.Load() {
+		return
+	}
+	err := a.deps.Engine.Restart(cfg, paths)
 	a.post(func() {
 		a.busy = false
 		a.busyTS = ""
@@ -394,7 +461,7 @@ func (a *App) doRestart(cfg config.Config, paths map[string]string) {
 		if err != nil {
 			a.err = err.Error()
 		} else {
-			a.dirty = false
+			a.dirty = rev != a.cfgRev
 			a.err = ""
 			a.notice = ""
 		}
@@ -429,9 +496,14 @@ func (a *App) addSubscription(name, rawURL string, nodes []config.Node, warnings
 		Nodes:     nodes,
 	}
 	a.cfg.Subscriptions = append(a.cfg.Subscriptions, sub)
-	if a.cfg.ActiveSubscription == "" {
+	activated := false
+	if a.cfg.ActiveSubscription == "" || len(a.cfg.ActiveNodes()) == 0 {
 		a.cfg.ActiveSubscription = id
 		a.cfg.SelectedNode = "auto"
+		activated = true
+	}
+	if activated {
+		a.markConfigChanged()
 	}
 	a.adding = false
 	a.addName = ""
@@ -462,6 +534,9 @@ func (a *App) replaceSubscription(id string, nodes []config.Node, warnings []str
 	if a.cfg.NodeByTag(a.cfg.SelectedNode) == nil {
 		a.cfg.SelectedNode = "auto"
 	}
+	if a.cfg.ActiveSubscription == id {
+		a.markConfigChanged()
+	}
 	a.nodeList = ui.ListState{}
 	a.cancelPing()
 	a.clearPings()
@@ -472,7 +547,7 @@ func (a *App) replaceSubscription(id string, nodes []config.Node, warnings []str
 }
 
 func (a *App) importSubscription() {
-	if a.busy {
+	if a.busy || a.workBusy || a.closed.Load() {
 		return
 	}
 	rawURL := strings.TrimSpace(a.addURL)
@@ -482,17 +557,21 @@ func (a *App) importSubscription() {
 	}
 	name := a.addName
 
-	a.busy = true
-	a.busyTS = "Загрузка подписки…"
+	a.workBusy = true
+	a.workTS = "Загрузка подписки…"
+	if a.fetchCancel != nil {
+		a.fetchCancel()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	a.fetchCancel = cancel
 	if a.win == nil {
-		a.doImport(name, rawURL)
+		a.doImport(ctx, cancel, name, rawURL)
 		return
 	}
-	go a.doImport(name, rawURL)
+	go a.doImport(ctx, cancel, name, rawURL)
 }
 
-func (a *App) doImport(name, rawURL string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+func (a *App) doImport(ctx context.Context, cancel context.CancelFunc, name, rawURL string) {
 	defer cancel()
 	data, err := a.deps.Fetcher.Fetch(ctx, rawURL)
 	if err == nil {
@@ -501,8 +580,9 @@ func (a *App) doImport(name, rawURL string) {
 		nodes, warnings, err = subscription.Parse(data)
 		if err == nil {
 			a.post(func() {
-				a.busy = false
-				a.busyTS = ""
+				a.fetchCancel = nil
+				a.workBusy = false
+				a.workTS = ""
 				a.err = ""
 				a.addSubscription(name, rawURL, nodes, warnings)
 				if a.win != nil {
@@ -513,8 +593,9 @@ func (a *App) doImport(name, rawURL string) {
 		}
 	}
 	a.post(func() {
-		a.busy = false
-		a.busyTS = ""
+		a.fetchCancel = nil
+		a.workBusy = false
+		a.workTS = ""
 		a.err = "Импорт не удался: " + err.Error()
 		if a.win != nil {
 			a.win.Invalidate()
@@ -523,7 +604,7 @@ func (a *App) doImport(name, rawURL string) {
 }
 
 func (a *App) refreshSubscription(id string) {
-	if a.busy {
+	if a.busy || a.workBusy || a.closed.Load() {
 		return
 	}
 	sub := a.cfg.Subscription(id)
@@ -531,10 +612,14 @@ func (a *App) refreshSubscription(id string) {
 		return
 	}
 	rawURL := sub.URL
-	a.busy = true
-	a.busyTS = "Обновление подписки…"
+	a.workBusy = true
+	a.workTS = "Обновление подписки…"
+	if a.fetchCancel != nil {
+		a.fetchCancel()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	a.fetchCancel = cancel
 	run := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 		data, err := a.deps.Fetcher.Fetch(ctx, rawURL)
 		if err == nil {
@@ -543,8 +628,9 @@ func (a *App) refreshSubscription(id string) {
 			nodes, warnings, err = subscription.Parse(data)
 			if err == nil {
 				a.post(func() {
-					a.busy = false
-					a.busyTS = ""
+					a.fetchCancel = nil
+					a.workBusy = false
+					a.workTS = ""
 					a.err = ""
 					a.replaceSubscription(id, nodes, warnings)
 					if a.win != nil {
@@ -555,8 +641,9 @@ func (a *App) refreshSubscription(id string) {
 			}
 		}
 		a.post(func() {
-			a.busy = false
-			a.busyTS = ""
+			a.fetchCancel = nil
+			a.workBusy = false
+			a.workTS = ""
 			a.err = "Обновление не удалось: " + err.Error()
 			if a.win != nil {
 				a.win.Invalidate()
@@ -571,6 +658,7 @@ func (a *App) refreshSubscription(id string) {
 }
 
 func (a *App) deleteSubscription(id string) {
+	wasActive := a.cfg.ActiveSubscription == id
 	for i := range a.cfg.Subscriptions {
 		if a.cfg.Subscriptions[i].ID != id {
 			continue
@@ -589,6 +677,9 @@ func (a *App) deleteSubscription(id string) {
 	a.nodeList = ui.ListState{}
 	a.cancelPing()
 	a.clearPings()
+	if wasActive {
+		a.markConfigChanged()
+	}
 	a.saveNow()
 	if a.state == model.StateRunning {
 		if len(a.cfg.ActiveNodes()) > 0 {
@@ -609,6 +700,7 @@ func (a *App) selectSubscription(id string) {
 	a.nodeIndex = 0
 	a.cancelPing()
 	a.clearPings()
+	a.markConfigChanged()
 	a.saveNow()
 	if a.state == model.StateRunning {
 		a.restartNow()
@@ -625,6 +717,8 @@ func (a *App) selectNode(index int) {
 		return
 	}
 	a.cfg.SelectedNode = tag
+	a.markConfigChanged()
+	a.cancelPing()
 	a.saveNow()
 	if a.state == model.StateRunning {
 		a.restartNow()
@@ -676,8 +770,15 @@ func (a *App) syncNodeIndex() {
 }
 
 func (a *App) routingChanged() {
-	a.dirty = true
+	a.markConfigChanged()
 	a.scheduleSave()
+}
+
+func (a *App) markConfigChanged() {
+	a.cfgRev++
+	if a.state == model.StateRunning {
+		a.dirty = true
+	}
 }
 
 func (a *App) clearPings() {
@@ -703,7 +804,7 @@ func (a *App) cancelPing() {
 }
 
 func (a *App) pingNodes() {
-	if a.pinging || a.busy {
+	if a.pinging || a.busy || a.workBusy || a.closed.Load() {
 		return
 	}
 	nodes := a.cfg.ActiveNodes()
@@ -784,25 +885,31 @@ func (a *App) latency(tag string) (string, string) {
 }
 
 func (a *App) updateRuleSet(tag string) {
-	if a.busy {
+	if a.busy || a.workBusy || a.closed.Load() {
 		return
 	}
-	a.busy = true
-	a.busyTS = "Скачивание баз…"
+	a.workBusy = true
+	a.workTS = "Скачивание баз…"
+	if a.rsCancel != nil {
+		a.rsCancel()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	a.rsCancel = cancel
 	run := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 		err := a.deps.RuleSets.Update(ctx, tag)
 		a.post(func() {
-			a.busy = false
-			a.busyTS = ""
+			a.rsCancel = nil
+			a.workBusy = false
+			a.workTS = ""
 			if err != nil {
 				a.err = "Базы: " + err.Error()
 			} else {
+				a.err = ""
 				a.notice = "Базы обновлены. Перезапустите подключение, чтобы применить правила."
-				if a.state == model.StateRunning {
-					a.dirty = true
-				}
+			}
+			if a.state == model.StateRunning {
+				a.markConfigChanged()
 			}
 			if a.win != nil {
 				a.win.Invalidate()
@@ -817,25 +924,31 @@ func (a *App) updateRuleSet(tag string) {
 }
 
 func (a *App) updateAllRuleSets() {
-	if a.busy {
+	if a.busy || a.workBusy || a.closed.Load() {
 		return
 	}
-	a.busy = true
-	a.busyTS = "Скачивание баз…"
+	a.workBusy = true
+	a.workTS = "Скачивание баз…"
+	if a.rsCancel != nil {
+		a.rsCancel()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	a.rsCancel = cancel
 	run := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		err := a.deps.RuleSets.Update(ctx)
 		a.post(func() {
-			a.busy = false
-			a.busyTS = ""
+			a.rsCancel = nil
+			a.workBusy = false
+			a.workTS = ""
 			if err != nil {
 				a.err = "Базы: " + err.Error()
 			} else {
+				a.err = ""
 				a.notice = "Базы обновлены. Перезапустите подключение, чтобы применить правила."
-				if a.state == model.StateRunning {
-					a.dirty = true
-				}
+			}
+			if a.state == model.StateRunning {
+				a.markConfigChanged()
 			}
 			if a.win != nil {
 				a.win.Invalidate()

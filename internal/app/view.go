@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/egoist/mygo/ui"
@@ -22,6 +23,9 @@ func (a *App) view(c *ui.Context) {
 		})
 		if a.notice != "" {
 			ui.Text(c, a.notice).TextColor(t.TextMuted).FontSize(12)
+		}
+		if a.workBusy && a.workTS != "" {
+			ui.Text(c, a.workTS).TextColor(t.TextMuted).FontSize(12)
 		}
 		if a.err != "" && a.page != 0 {
 			ui.Text(c, a.err).TextColor(t.Danger).FontSize(12).Wrap()
@@ -67,7 +71,7 @@ func (a *App) header(c *ui.Context) {
 			ui.Button(c, a.busyTS).Disabled(true)
 		} else if a.state == model.StateRunning {
 			if a.dirty {
-				ui.PrimaryButton(c, "Перезапустить").OnClick(a.restartNow)
+				ui.PrimaryButton(c, "Перезапустить").Disabled(a.workBusy).OnClick(a.restartNow)
 			}
 			ui.Button(c, "Отключиться").OnClick(a.stop)
 		} else {
@@ -75,7 +79,7 @@ func (a *App) header(c *ui.Context) {
 			if a.state == model.StateError {
 				label = "Повторить"
 			}
-			ui.PrimaryButton(c, label).OnClick(a.start)
+			ui.PrimaryButton(c, label).Disabled(a.workBusy).OnClick(a.start)
 		}
 	})
 }
@@ -88,7 +92,7 @@ func (a *App) statusDetail() string {
 	if sub := a.activeSub(); sub != nil {
 		parts = append(parts, "подписка: "+sub.Name)
 	}
-	if a.cfg.SelectedNode != "" && a.cfg.SelectedNode != "auto" {
+	if a.cfg.Routing.Mode != config.ModeDirect && a.cfg.SelectedNode != "" && a.cfg.SelectedNode != "auto" {
 		parts = append(parts, "нода: "+a.cfg.SelectedNode)
 	}
 	return strings.Join(parts, "  ·  ")
@@ -120,6 +124,10 @@ func (a *App) connectionPage(c *ui.Context) {
 		if a.tray != nil {
 			ui.Text(c, "Закрытие окна сворачивает qbox в трей; выход — через меню значка qbox.").TextColor(t.TextMuted)
 		}
+		if a.state == model.StateRunning && a.cfg.Routing.Mode != config.ModeDirect &&
+			a.cfg.DNS.UseProxy && !a.cfg.TUN.StrictRoute && !a.cfg.TUN.DisableIPv6 {
+			ui.Text(c, "Strict route выключен: возможны DNS-утечки через физические адаптеры Windows.").TextColor(t.Warning)
+		}
 		if len(a.cfg.ActiveNodes()) == 0 {
 			ui.Text(c, "Нет нод. Откройте «Серверы» и добавьте подписку.").TextColor(t.TextMuted)
 		}
@@ -138,9 +146,12 @@ func (a *App) stateHint() string {
 	switch a.state {
 	case model.StateRunning:
 		if a.cfg.Routing.Mode == config.ModeDirect {
-			return "Трафик идёт напрямую, без прокси."
+			return "Трафик идёт напрямую; TUN, DNS hijack и adblock продолжают работать."
 		}
-		return "Весь трафик направлен через выбранную ноду."
+		if a.cfg.Routing.Mode == config.ModeGlobal {
+			return "Весь трафик идёт через ноду; LAN и adblock — по настройкам, списки и обход РФ не применяются."
+		}
+		return "Основной трафик идёт через ноду; LAN, свои списки и обход РФ — по правилам."
 	case model.StateStarting:
 		return "Создаётся TUN-интерфейс и применяются маршруты."
 	case model.StateStopping:
@@ -161,7 +172,7 @@ func (a *App) serversPage(c *ui.Context) {
 				if a.pinging {
 					ui.Button(c, fmt.Sprintf("Отмена (%d/%d)", a.pingDone, a.pingTotal)).OnClick(a.cancelPing)
 				} else {
-					ui.Button(c, "Пинг всех").Disabled(a.busy).OnClick(a.pingNodes)
+					ui.Button(c, "Пинг всех").Disabled(a.busy || a.workBusy).OnClick(a.pingNodes)
 				}
 			}
 			if !a.adding {
@@ -235,7 +246,7 @@ func (a *App) addSubscriptionForm(c *ui.Context) {
 		ui.TextInput(c, &a.addName).Label("Название").Placeholder("например, Provider")
 		ui.TextInput(c, &a.addURL).Label("URL").Placeholder("https://example.com/sub")
 		ui.Row(c).Gap(8).Children(func() {
-			ui.PrimaryButton(c, "Импортировать").Disabled(a.busy || strings.TrimSpace(a.addURL) == "").OnClick(a.importSubscription)
+			ui.PrimaryButton(c, "Импортировать").Disabled(a.busy || a.workBusy || strings.TrimSpace(a.addURL) == "").OnClick(a.importSubscription)
 			ui.Button(c, "Отмена").OnClick(func() {
 				a.adding = false
 				a.addName = ""
@@ -267,7 +278,7 @@ func (a *App) subscriptionCard(c *ui.Context, sub config.Subscription) {
 			}
 			ui.Textf(c, "%d нод · %s", len(sub.Nodes), updated).TextColor(t.TextMuted).FontSize(12).Grow(1)
 			id := sub.ID
-			ui.Button(c, "Обновить").Disabled(a.busy).OnClick(func() { a.refreshSubscription(id) })
+			ui.Button(c, "Обновить").Disabled(a.busy || a.workBusy).OnClick(func() { a.refreshSubscription(id) })
 			if a.confirmDel == id {
 				ui.Button(c, "Удалить?").OnClick(func() { a.deleteSubscription(id) })
 				ui.Button(c, "Нет").OnClick(func() { a.confirmDel = "" })
@@ -286,7 +297,7 @@ func (a *App) routingPage(c *ui.Context) {
 		ui.Segmented(c, &mode, "Global", "Rules", "Direct").FillEqually().OnChange(func() {
 			a.setMode(mode)
 		})
-		ui.Text(c, "Global — всё через прокси; Rules — списки и гео-правила; Direct — без прокси.").TextColor(t.TextMuted).FontSize(12)
+		ui.Text(c, "Global — весь трафик через прокси; LAN и блокировка рекламы действуют по настройкам. Rules — списки и гео-правила; Direct — без прокси.").TextColor(t.TextMuted).FontSize(12)
 
 		a.switchRow(c, "Обход локальной сети", &a.cfg.Routing.BypassLAN, "Приватные IP идут напрямую.")
 		a.switchRow(c, "Обход РФ", &a.cfg.Routing.BypassRU, "Домены и IP РФ идут напрямую (rule-sets).")
@@ -296,10 +307,10 @@ func (a *App) routingPage(c *ui.Context) {
 		for _, st := range a.deps.RuleSets.Status() {
 			a.ruleSetRow(c, st)
 		}
-		ui.Button(c, "Обновить все базы").Disabled(a.busy).OnClick(a.updateAllRuleSets)
+		ui.Button(c, "Обновить все базы").Disabled(a.busy || a.workBusy).OnClick(a.updateAllRuleSets)
 
 		ui.Text(c, "Свои списки").FontSize(16).Bold()
-		ui.Text(c, "Правила proxy проверяются раньше обхода РФ, затем direct и финальный маршрут.").TextColor(t.TextMuted).FontSize(12)
+		ui.Text(c, "Списки proxy/direct и обход РФ применяются только в режиме Rules. Порядок: proxy → свои direct-списки → обход РФ → финальный маршрут.").TextColor(t.TextMuted).FontSize(12)
 
 		ui.Text(c, "Proxy: домены (по одному в строке)").TextColor(t.TextMuted).FontSize(12)
 		ui.TextArea(c, &a.proxyText).Lines(2, 5).OnChange(func() {
@@ -351,7 +362,7 @@ func (a *App) ruleSetRow(c *ui.Context, st rulesets.Status) {
 		if st.Installed {
 			label = "Обновить"
 		}
-		ui.Button(c, label).Disabled(a.busy).OnClick(func() { a.updateRuleSet(tag) })
+		ui.Button(c, label).Disabled(a.busy || a.workBusy).OnClick(func() { a.updateRuleSet(tag) })
 	})
 }
 
@@ -398,7 +409,10 @@ func (a *App) settingsPage(c *ui.Context) {
 		a.switchRow(c, "Отключить IPv6 в TUN", &a.cfg.TUN.DisableIPv6, "Включайте, если Windows не может назначить IPv6-адрес TUN-интерфейсу.")
 		ui.Text(c, "Имя интерфейса").TextColor(t.TextMuted).FontSize(12)
 		ui.TextInput(c, &a.cfg.TUN.InterfaceName).Label("Имя интерфейса").OnChange(a.routingChanged)
-		a.switchRow(c, "Strict route", &a.cfg.TUN.StrictRoute, "Блокирует утечки DNS и обход TUN; может ломать отдельные приложения.")
+		a.switchRow(c, "Strict route", &a.cfg.TUN.StrictRoute, "Блокирует утечки DNS и обход TUN; может ломать отдельные приложения. При отключённом IPv6 включается автоматически.")
+		if a.cfg.DNS.UseProxy && !a.cfg.TUN.StrictRoute && !a.cfg.TUN.DisableIPv6 && a.cfg.Routing.Mode != config.ModeDirect {
+			ui.Text(c, "Strict route выключен: Windows может использовать DNS физических адаптеров в обход туннеля.").TextColor(t.Warning).FontSize(12).Wrap()
+		}
 
 		ui.Text(c, "DNS").FontSize(18).Bold()
 		ui.Text(c, "DoH/DoT сервер").TextColor(t.TextMuted).FontSize(12)
@@ -421,10 +435,18 @@ func (a *App) settingsPage(c *ui.Context) {
 }
 
 func displayURL(raw string) string {
-	if len(raw) > 100 {
-		return raw[:97] + "…"
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "…"
 	}
-	return raw
+	display := u.Scheme + "://" + u.Host
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		display += "/…"
+	}
+	if len(display) > 100 {
+		return display[:97] + "…"
+	}
+	return display
 }
 
 func formatBytes(n int64) string {

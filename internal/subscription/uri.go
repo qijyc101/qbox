@@ -43,7 +43,7 @@ func parseURI(line string) (map[string]any, error) {
 }
 
 func parseVLESS(line string) (map[string]any, error) {
-	u, err := url.Parse(line)
+	u, err := parseURL(line, "vless")
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +174,7 @@ func parseVMess(line string) (map[string]any, error) {
 }
 
 func parseVMessURI(line string) (map[string]any, error) {
-	u, err := url.Parse(line)
+	u, err := parseURL(line, "vmess")
 	if err != nil {
 		return nil, err
 	}
@@ -212,13 +212,17 @@ func parseVMessURI(line string) (map[string]any, error) {
 }
 
 func parseTrojan(line string) (map[string]any, error) {
-	u, err := url.Parse(line)
+	u, err := parseURL(line, "trojan")
 	if err != nil {
 		return nil, err
 	}
 	password := u.User.Username()
 	if pass, ok := u.User.Password(); ok {
-		password += ":" + pass
+		if password == "" {
+			password = pass
+		} else {
+			password += ":" + pass
+		}
 	}
 	if password == "" {
 		password = u.User.String()
@@ -273,7 +277,7 @@ func parseShadowsocks(line string) (map[string]any, error) {
 		hostport = raw[i+1:]
 		if decoded, err := decodeBase64String(userinfo); err == nil && strings.Contains(string(decoded), ":") {
 			userinfo = string(decoded)
-		} else if unescaped, err := url.QueryUnescape(userinfo); err == nil {
+		} else if unescaped, err := url.PathUnescape(userinfo); err == nil {
 			userinfo = unescaped
 		}
 		parts := strings.SplitN(userinfo, ":", 2)
@@ -317,13 +321,17 @@ func parseShadowsocks(line string) (map[string]any, error) {
 }
 
 func parseHysteria2(line string) (map[string]any, error) {
-	u, err := url.Parse(line)
+	u, err := parseURL(line, "hysteria2")
 	if err != nil {
 		return nil, err
 	}
 	auth := u.User.Username()
 	if pass, ok := u.User.Password(); ok {
-		auth += ":" + pass
+		if auth == "" {
+			auth = pass
+		} else {
+			auth += ":" + pass
+		}
 	}
 	if auth == "" {
 		auth = u.User.String()
@@ -363,7 +371,7 @@ func parseHysteria2(line string) (map[string]any, error) {
 }
 
 func parseTUIC(line string) (map[string]any, error) {
-	u, err := url.Parse(line)
+	u, err := parseURL(line, "tuic")
 	if err != nil {
 		return nil, err
 	}
@@ -401,7 +409,7 @@ func parseTUIC(line string) (map[string]any, error) {
 }
 
 func parseSOCKS(line string) (map[string]any, error) {
-	u, err := url.Parse(line)
+	u, err := parseURL(line, "socks")
 	if err != nil {
 		return nil, err
 	}
@@ -426,7 +434,7 @@ func parseSOCKS(line string) (map[string]any, error) {
 }
 
 func parseHTTP(line string) (map[string]any, error) {
-	u, err := url.Parse(line)
+	u, err := parseURL(line, "http")
 	if err != nil {
 		return nil, err
 	}
@@ -522,15 +530,20 @@ func buildTransport(kind, host, path, serviceName, mode string, q url.Values) (m
 		if host != "" {
 			transport["host"] = splitList(host)
 		}
-		if mode != "" {
-			transport["method"] = mode
-		}
 		return transport, nil
 	case "quic":
 		return map[string]any{"type": "quic"}, nil
 	default:
 		return nil, fmt.Errorf("транспорт %q не поддерживается", kind)
 	}
+}
+
+func parseURL(line, scheme string) (*url.URL, error) {
+	u, err := url.Parse(line)
+	if err != nil {
+		return nil, fmt.Errorf("%s: некорректный URL", scheme)
+	}
+	return u, nil
 }
 
 func hostPort(u *url.URL, defaultPort int) (string, int, error) {

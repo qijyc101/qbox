@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,17 +17,18 @@ import (
 )
 
 type fakeEngine struct {
-	mu       sync.Mutex
-	state    model.State
-	stats    model.Stats
-	logs     []model.LogEntry
-	started  int
-	stopped  int
-	pinged   int
-	startErr error
-	stopErr  error
-	cfg      config.Config
-	paths    map[string]string
+	mu        sync.Mutex
+	state     model.State
+	stats     model.Stats
+	logs      []model.LogEntry
+	started   int
+	stopped   int
+	restarted int
+	pinged    int
+	startErr  error
+	stopErr   error
+	cfg       config.Config
+	paths     map[string]string
 }
 
 func (f *fakeEngine) Start(cfg config.Config, paths map[string]string) error {
@@ -51,6 +53,14 @@ func (f *fakeEngine) Stop() error {
 	return f.stopErr
 }
 
+func (f *fakeEngine) Restart(cfg config.Config, paths map[string]string) error {
+	f.mu.Lock()
+	f.stopped++
+	f.restarted++
+	f.mu.Unlock()
+	return f.Start(cfg, paths)
+}
+
 func (f *fakeEngine) State() model.State {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -72,10 +82,20 @@ func (f *fakeEngine) Logs() ([]model.LogEntry, uint64) {
 	return append([]model.LogEntry(nil), f.logs...), uint64(len(f.logs))
 }
 
+func (f *fakeEngine) LogRevision() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return uint64(len(f.logs))
+}
+
 func (f *fakeEngine) ClearLogs() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.logs = nil
+}
+
+func (f *fakeEngine) Close() {
+	_ = f.Stop()
 }
 
 func (f *fakeEngine) Ping(ctx context.Context, nodes []config.Node) <-chan model.PingResult {
@@ -284,8 +304,8 @@ func TestImportError(t *testing.T) {
 	if a.err == "" {
 		t.Fatal("no error shown")
 	}
-	if a.busy {
-		t.Fatal("busy was not cleared")
+	if a.workBusy {
+		t.Fatal("workBusy was not cleared")
 	}
 }
 
@@ -325,6 +345,81 @@ func TestBeforeQuitStopsEngine(t *testing.T) {
 	}
 	if eng.stopped == 0 {
 		t.Fatal("engine was not stopped")
+	}
+}
+
+func TestDisplayURLRedacts(t *testing.T) {
+	got := displayURL("https://user:pass@example.com/sub/TOKEN?token=SECRET")
+	if strings.Contains(got, "TOKEN") || strings.Contains(got, "SECRET") || strings.Contains(got, "user") {
+		t.Fatalf("displayURL = %q", got)
+	}
+	if got != "https://example.com/…" {
+		t.Fatalf("displayURL = %q", got)
+	}
+}
+
+func TestCancelPing(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	eng := &fakeEngine{state: model.StateStopped}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	canceled := false
+	a.pinging = true
+	a.pingGen = 1
+	a.pingTotal = 2
+	a.pingDone = 1
+	a.pingCancel = func() { canceled = true }
+	a.cancelPing()
+	if !canceled || a.pinging {
+		t.Fatalf("canceled=%v pinging=%v", canceled, a.pinging)
+	}
+	if a.notice != "Пинг отменён" {
+		t.Fatalf("notice = %q", a.notice)
+	}
+}
+
+func TestRetryAfterErrorRestarts(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	eng := &fakeEngine{state: model.StateError, startErr: errors.New("old failure")}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	a.state = model.StateError
+	a.start()
+	if eng.restarted != 1 {
+		t.Fatalf("restarts = %d", eng.restarted)
+	}
+}
+
+func TestStopDuringDownload(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	eng := &fakeEngine{state: model.StateRunning}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	a.state = model.StateRunning
+	a.workBusy = true
+	a.stop()
+	if eng.stopped != 1 {
+		t.Fatalf("stops = %d", eng.stopped)
+	}
+}
+
+func TestPostAfterShutdownIsDropped(t *testing.T) {
+	cfg := testConfig(t)
+	eng := &fakeEngine{state: model.StateStopped}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	a.closed.Store(true)
+	called := false
+	a.post(func() { called = true })
+	if called {
+		t.Fatal("post ran after shutdown")
+	}
+}
+
+func TestConfigRevisionKeepsDirty(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	eng := &fakeEngine{state: model.StateStopped}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	a.cfgRev = 5
+	a.doStart(cfg, nil, 4)
+	if !a.dirty {
+		t.Fatal("dirty was cleared although config changed during start")
 	}
 }
 

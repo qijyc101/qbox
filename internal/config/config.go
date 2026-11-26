@@ -4,6 +4,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +15,9 @@ import (
 
 // Version is the current configuration schema version.
 const Version = 1
+
+// maxConfigSize bounds the config file read from disk.
+const maxConfigSize = 32 << 20
 
 // Routing modes.
 const (
@@ -106,6 +110,7 @@ func Defaults() Config {
 			InterfaceName: "qbox",
 			Stack:         StackMixed,
 			MTU:           9000,
+			StrictRoute:   true,
 		},
 		DNS: DNS{
 			Remote:   "https://1.1.1.1/dns-query",
@@ -172,7 +177,8 @@ func (c *Config) Normalize() {
 		c.Routing.Mode = def.Routing.Mode
 	}
 
-	if c.TUN.InterfaceName == "" {
+	c.TUN.InterfaceName = strings.TrimSpace(c.TUN.InterfaceName)
+	if !validInterfaceName(c.TUN.InterfaceName) {
 		c.TUN.InterfaceName = def.TUN.InterfaceName
 	}
 	switch c.TUN.Stack {
@@ -180,34 +186,76 @@ func (c *Config) Normalize() {
 	default:
 		c.TUN.Stack = def.TUN.Stack
 	}
-	if c.TUN.MTU <= 0 {
+	minMTU := 576
+	if !c.TUN.DisableIPv6 {
+		minMTU = 1280
+	}
+	if c.TUN.MTU < minMTU || c.TUN.MTU > 65535 {
 		c.TUN.MTU = def.TUN.MTU
 	}
 	if c.DNS.Remote == "" {
 		c.DNS.Remote = def.DNS.Remote
 	}
+	if c.LogLevel == "warning" {
+		c.LogLevel = "warn"
+	}
 	if c.LogLevel == "" {
 		c.LogLevel = def.LogLevel
 	}
 	switch c.LogLevel {
-	case "trace", "debug", "info", "warn", "warning", "error":
+	case "trace", "debug", "info", "warn", "error":
 	default:
 		c.LogLevel = def.LogLevel
 	}
 	if c.SelectedNode == "" {
 		c.SelectedNode = "auto"
 	}
+	usedIDs := make(map[string]struct{}, len(c.Subscriptions))
+	for i := range c.Subscriptions {
+		id := c.Subscriptions[i].ID
+		if id == "" {
+			id = fmt.Sprintf("sub-%d", i+1)
+		}
+		base := id
+		for n := 2; ; n++ {
+			if _, exists := usedIDs[id]; !exists {
+				break
+			}
+			id = fmt.Sprintf("%s-%d", base, n)
+		}
+		usedIDs[id] = struct{}{}
+		c.Subscriptions[i].ID = id
+	}
 	if c.ActiveSubscription != "" && c.Subscription(c.ActiveSubscription) == nil {
 		c.ActiveSubscription = ""
+	}
+	if c.ActiveSubscription == "" || len(c.ActiveNodes()) == 0 {
+		c.ActiveSubscription = ""
+		for i := range c.Subscriptions {
+			if len(c.Subscriptions[i].Nodes) > 0 {
+				c.ActiveSubscription = c.Subscriptions[i].ID
+				break
+			}
+		}
 	}
 	if c.ActiveSubscription == "" && len(c.Subscriptions) > 0 {
 		c.ActiveSubscription = c.Subscriptions[0].ID
 	}
-	for i := range c.Subscriptions {
-		if c.Subscriptions[i].ID == "" {
-			c.Subscriptions[i].ID = fmt.Sprintf("sub-%d", i+1)
+}
+
+func validInterfaceName(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	if strings.ContainsAny(name, `\/:*?"<>|`) {
+		return false
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return false
 		}
 	}
+	return true
 }
 
 // Subscription returns the subscription with the given ID, if any.
@@ -242,10 +290,13 @@ func (c *Config) ActiveNodes() []Node {
 
 // NodeByTag finds a node of the active subscription.
 func (c *Config) NodeByTag(tag string) *Node {
-	for _, n := range c.ActiveNodes() {
-		if n.Tag == tag {
-			node := n
-			return &node
+	sub := c.Active()
+	if sub == nil {
+		return nil
+	}
+	for i := range sub.Nodes {
+		if sub.Nodes[i].Tag == tag {
+			return &sub.Nodes[i]
 		}
 	}
 	return nil
@@ -284,25 +335,25 @@ func (s *Store) Load() (Config, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	data, err := os.ReadFile(s.path)
+	data, err := readLimited(s.path, maxConfigSize)
 	if err != nil {
 		if os.IsNotExist(err) {
 			cfg := Defaults()
 			cfg.Normalize()
 			return cfg, nil
 		}
-		return Defaults(), err
+		if backup, backupErr := readConfigFile(s.path + ".bak"); backupErr == nil {
+			return backup, fmt.Errorf("config.json недоступен (%v); загружена резервная копия", err)
+		}
+		fallback := Defaults()
+		fallback.Normalize()
+		return fallback, fmt.Errorf("config.json недоступен: %w", err)
 	}
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		backup, backupErr := os.ReadFile(s.path + ".bak")
-		if backupErr == nil {
-			var restored Config
-			if json.Unmarshal(backup, &restored) == nil {
-				restored.Normalize()
-				return restored, fmt.Errorf("config.json повреждён (%v); загружена резервная копия", err)
-			}
+		if backup, backupErr := readConfigFile(s.path + ".bak"); backupErr == nil {
+			return backup, fmt.Errorf("config.json повреждён (%v); загружена резервная копия", err)
 		}
 		fallback := Defaults()
 		fallback.Normalize()
@@ -310,6 +361,42 @@ func (s *Store) Load() (Config, error) {
 	}
 	cfg.Normalize()
 	return cfg, nil
+}
+
+func readConfigFile(path string) (Config, error) {
+	data, err := readLimited(path, maxConfigSize)
+	if err != nil {
+		return Config{}, err
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return Config{}, err
+	}
+	cfg.Normalize()
+	return cfg, nil
+}
+
+func readLimited(path string, limit int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > limit {
+		return nil, fmt.Errorf("файл %s больше %d МБ", path, limit>>20)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("файл %s вырос больше %d МБ", path, limit>>20)
+	}
+	return data, nil
 }
 
 // Save writes the configuration atomically, keeping one backup copy.
@@ -324,8 +411,10 @@ func (s *Store) Save(cfg Config) error {
 		return err
 	}
 
-	if old, err := os.ReadFile(s.path); err == nil && len(old) > 0 {
-		_ = os.WriteFile(s.path+".bak", old, 0o600)
+	// Only preserve a valid, writable-sized primary as the backup; a corrupt
+	// or oversized file must not replace a good .bak.
+	if old, err := readLimited(s.path, maxConfigSize); err == nil && len(old) > 0 && json.Valid(old) {
+		_ = writeAtomic(s.path+".bak", old, 0o600)
 	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -333,14 +422,21 @@ func (s *Store) Save(cfg Config) error {
 		return err
 	}
 	data = append(data, '\n')
+	if int64(len(data)) > maxConfigSize {
+		return fmt.Errorf("конфигурация больше %d МБ", maxConfigSize>>20)
+	}
+	return writeAtomic(s.path, data, 0o600)
+}
 
-	tmp, err := os.CreateTemp(s.dir, ".config-*.tmp")
+func writeAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0o600); err != nil {
+	if err := tmp.Chmod(perm); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -355,7 +451,7 @@ func (s *Store) Save(cfg Config) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, s.path)
+	return os.Rename(tmpName, path)
 }
 
 // CleanList trims lines, drops empty ones and comments, and removes

@@ -34,7 +34,11 @@ type Engine struct {
 	opts Options
 	logs *LogSink
 
-	opMu sync.Mutex // serializes Start and Stop
+	rootCtx    context.Context
+	rootCancel context.CancelFunc
+
+	opMu   sync.Mutex // serializes Start, Stop, Restart and Close
+	closed bool
 
 	mu       sync.Mutex
 	state    model.State
@@ -43,14 +47,22 @@ type Engine struct {
 	instance *box.Box
 	cancel   context.CancelFunc
 	traffic  *trafficcontrol.Manager
+
+	tempMu     sync.Mutex
+	tempBoxes  map[*box.Box]struct{}
+	tempClosed bool
 }
 
 // New creates an engine. Call Start to run it.
 func New(opts Options) *Engine {
+	rootCtx, rootCancel := context.WithCancel(context.Background())
 	return &Engine{
-		opts:  opts,
-		logs:  NewLogSink(opts.LogFile),
-		state: model.StateStopped,
+		opts:       opts,
+		logs:       NewLogSink(opts.LogFile),
+		rootCtx:    rootCtx,
+		rootCancel: rootCancel,
+		state:      model.StateStopped,
+		tempBoxes:  make(map[*box.Box]struct{}),
 	}
 }
 
@@ -100,6 +112,18 @@ func (e *Engine) setState(state model.State, err error) {
 func (e *Engine) Start(cfg config.Config, ruleSetPaths map[string]string) error {
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
+	if e.closed {
+		return errors.New("движок закрыт")
+	}
+	return e.startLocked(cfg, ruleSetPaths)
+}
+
+func (e *Engine) startLocked(cfg config.Config, ruleSetPaths map[string]string) error {
+	cfg = cfg.Clone()
+	if err := canonicalizeNodes(&cfg); err != nil {
+		e.setState(model.StateError, err)
+		return err
+	}
 
 	e.mu.Lock()
 	running := e.instance != nil
@@ -131,6 +155,7 @@ func (e *Engine) Start(cfg config.Config, ruleSetPaths map[string]string) error 
 		e.setState(model.StateError, err)
 		return err
 	}
+	collectedWarnings := append([]string(nil), warnings...)
 
 	instance, cancel, traffic, err := e.launch(data)
 	if err != nil && !cfg.TUN.DisableIPv6 && isIPv6ConfigError(err) {
@@ -140,16 +165,21 @@ func (e *Engine) Start(cfg config.Config, ruleSetPaths map[string]string) error 
 		data, warnings, buildErr := boxconf.Build(buildInput)
 		e.logWarnings(warnings)
 		if buildErr == nil {
+			collectedWarnings = append([]string(nil), warnings...)
 			instance, cancel, traffic, err = e.launch(data)
 			if err == nil {
-				e.setWarning("TUN работает только по IPv4: Windows не может назначить IPv6-адрес. Проверьте утечки IPv6 или включите IPv6 в системе.")
+				collectedWarnings = append(collectedWarnings,
+					"TUN работает только по IPv4. strict_route блокирует IPv6-утечки; проверьте настройки IPv6.")
 			}
+		} else {
+			e.logs.WriteMessage(log.LevelError, "повтор без IPv6: "+buildErr.Error())
 		}
 	}
 	if err != nil {
 		e.setState(model.StateError, err)
 		return err
 	}
+	e.setWarning(strings.Join(collectedWarnings, "; "))
 
 	if traffic == nil {
 		e.logs.WriteMessage(log.LevelWarn, "статистика трафика недоступна")
@@ -176,7 +206,7 @@ func (e *Engine) logWarnings(warnings []string) {
 // launch parses a generated configuration and starts a sing-box instance.
 // On failure the instance closes itself and the context is cancelled.
 func (e *Engine) launch(data []byte) (*box.Box, context.CancelFunc, *trafficcontrol.Manager, error) {
-	ctx := include.Context(context.Background())
+	ctx := include.Context(e.rootCtx)
 	ctx, cancel := context.WithCancel(ctx)
 
 	opts, err := singjson.UnmarshalExtendedContext[option.Options](ctx, data)
@@ -194,6 +224,7 @@ func (e *Engine) launch(data []byte) (*box.Box, context.CancelFunc, *trafficcont
 		return nil, nil, nil, fmt.Errorf("создание sing-box: %w", err)
 	}
 	if err := instance.Start(); err != nil {
+		_ = instance.Close()
 		cancel()
 		return nil, nil, nil, fmt.Errorf("запуск sing-box: %w", err)
 	}
@@ -203,21 +234,39 @@ func (e *Engine) launch(data []byte) (*box.Box, context.CancelFunc, *trafficcont
 
 func isIPv6ConfigError(err error) bool {
 	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "set ipv6 address") ||
-		strings.Contains(message, "set ipv6 dns") ||
-		strings.Contains(message, "set ipv6 options")
+	return strings.Contains(message, "ipv6") ||
+		strings.Contains(message, "element not found")
 }
 
 // Stop stops the running sing-box instance.
 func (e *Engine) Stop() error {
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
+	return e.stopLocked()
+}
 
+// Restart stops the current instance and starts a new one while holding the
+// operation lock, so a quit cannot slip into the gap between them.
+func (e *Engine) Restart(cfg config.Config, ruleSetPaths map[string]string) error {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+	if e.closed {
+		return errors.New("движок закрыт")
+	}
+	if err := e.stopLocked(); err != nil {
+		return err
+	}
+	return e.startLocked(cfg, ruleSetPaths)
+}
+
+func (e *Engine) stopLocked() error {
 	e.mu.Lock()
 	instance := e.instance
 	cancel := e.cancel
 	if instance == nil {
-		e.state = model.StateStopped
+		if e.state != model.StateError {
+			e.state = model.StateStopped
+		}
 		e.mu.Unlock()
 		return nil
 	}
@@ -230,6 +279,19 @@ func (e *Engine) Stop() error {
 		cancel()
 	}
 
+	if err != nil {
+		// Keep the instance so a later Stop can retry the cleanup instead of
+		// dropping the only reference to a half-closed TUN.
+		e.mu.Lock()
+		e.instance = instance
+		e.cancel = nil
+		e.traffic = nil
+		e.state = model.StateError
+		e.lastErr = fmt.Sprintf("остановка sing-box: %v", err)
+		e.mu.Unlock()
+		return fmt.Errorf("остановка sing-box: %w", err)
+	}
+
 	e.mu.Lock()
 	e.instance = nil
 	e.cancel = nil
@@ -237,11 +299,6 @@ func (e *Engine) Stop() error {
 	e.state = model.StateStopped
 	e.mu.Unlock()
 
-	if err != nil {
-		err = fmt.Errorf("остановка sing-box: %w", err)
-		e.setState(model.StateError, err)
-		return err
-	}
 	e.logs.WriteMessage(log.LevelInfo, "qbox: подключение остановлено")
 	return nil
 }
@@ -268,13 +325,64 @@ func (e *Engine) Logs() ([]model.LogEntry, uint64) {
 	return e.logs.Snapshot()
 }
 
+// LogRevision returns the log revision without copying entries.
+func (e *Engine) LogRevision() uint64 {
+	return e.logs.Revision()
+}
+
 // ClearLogs empties the UI log buffer.
 func (e *Engine) ClearLogs() {
 	e.logs.Clear()
 }
 
-// Close stops the engine and closes its log file.
+// Close stops the engine and closes its log file. The engine cannot be
+// started again afterwards.
 func (e *Engine) Close() {
-	_ = e.Stop()
+	// Cancel any in-flight Start before waiting for the operation lock, so a
+	// stuck startup cannot block quitting.
+	e.rootCancel()
+	e.opMu.Lock()
+	if e.closed {
+		e.opMu.Unlock()
+		return
+	}
+	e.closed = true
+	err := e.stopLocked()
+	e.opMu.Unlock()
+	if err != nil {
+		e.logs.WriteMessage(log.LevelError, err.Error())
+	}
+
+	e.tempMu.Lock()
+	e.tempClosed = true
+	tempBoxes := make([]*box.Box, 0, len(e.tempBoxes))
+	for instance := range e.tempBoxes {
+		tempBoxes = append(tempBoxes, instance)
+	}
+	e.tempBoxes = make(map[*box.Box]struct{})
+	e.tempMu.Unlock()
+	for _, instance := range tempBoxes {
+		_ = instance.Close()
+	}
+
 	e.logs.Close()
+}
+
+// trackTemp registers a short-lived ping instance so Close can stop it. It
+// returns false when the engine is already closed; the caller must then
+// close the instance itself without starting it.
+func (e *Engine) trackTemp(instance *box.Box) bool {
+	e.tempMu.Lock()
+	defer e.tempMu.Unlock()
+	if e.tempClosed {
+		return false
+	}
+	e.tempBoxes[instance] = struct{}{}
+	return true
+}
+
+func (e *Engine) untrackTemp(instance *box.Box) {
+	e.tempMu.Lock()
+	delete(e.tempBoxes, instance)
+	e.tempMu.Unlock()
 }

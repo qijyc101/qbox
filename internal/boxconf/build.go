@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"qbox/internal/config"
+	"qbox/internal/jsonutil"
 )
 
 // Input is everything the builder needs.
@@ -141,23 +142,25 @@ func Build(in Input) ([]byte, []string, error) {
 	nodes := cfg.ActiveNodes()
 	tags := make(map[string]struct{}, len(nodes))
 	nodeTags := make([]string, 0, len(nodes))
-
 	outbounds := make([]json.RawMessage, 0, len(nodes)+2)
-	for _, node := range nodes {
-		if node.Server == "" {
-			return nil, warnings, fmt.Errorf("нода %q: пустой адрес", node.Tag)
-		}
-		if _, exists := tags[node.Tag]; exists {
-			return nil, warnings, fmt.Errorf("дублирующийся тег ноды %q", node.Tag)
-		}
-		tags[node.Tag] = struct{}{}
-		nodeTags = append(nodeTags, node.Tag)
 
-		raw, err := withTag(node.Outbound, node.Tag)
-		if err != nil {
-			return nil, warnings, fmt.Errorf("нода %q: %w", node.Tag, err)
+	if cfg.Routing.Mode != config.ModeDirect {
+		for _, node := range nodes {
+			if node.Server == "" {
+				return nil, warnings, fmt.Errorf("нода %q: пустой адрес", node.Tag)
+			}
+			if _, exists := tags[node.Tag]; exists {
+				return nil, warnings, fmt.Errorf("дублирующийся тег ноды %q", node.Tag)
+			}
+			tags[node.Tag] = struct{}{}
+			nodeTags = append(nodeTags, node.Tag)
+
+			raw, err := withTag(node.Outbound, node.Tag)
+			if err != nil {
+				return nil, warnings, fmt.Errorf("нода %q: %w", node.Tag, err)
+			}
+			outbounds = append(outbounds, raw)
 		}
-		outbounds = append(outbounds, raw)
 	}
 
 	final := "direct"
@@ -165,18 +168,6 @@ func Build(in Input) ([]byte, []string, error) {
 		if len(nodes) == 0 {
 			return nil, warnings, errors.New("нет нод: добавьте подписку или выберите режим Direct")
 		}
-		auto, err := json.Marshal(map[string]any{
-			"type":      "urltest",
-			"tag":       "auto",
-			"outbounds": nodeTags,
-			"url":       "https://www.gstatic.com/generate_204",
-			"interval":  "3m",
-			"tolerance": 50,
-		})
-		if err != nil {
-			return nil, warnings, err
-		}
-		outbounds = append(outbounds, auto)
 		final = "auto"
 		if cfg.SelectedNode != "" && cfg.SelectedNode != "auto" {
 			if _, ok := tags[cfg.SelectedNode]; ok {
@@ -184,6 +175,20 @@ func Build(in Input) ([]byte, []string, error) {
 			} else {
 				warnings = append(warnings, fmt.Sprintf("нода %q не найдена, используется auto", cfg.SelectedNode))
 			}
+		}
+		if final == "auto" {
+			auto, err := json.Marshal(map[string]any{
+				"type":      "urltest",
+				"tag":       "auto",
+				"outbounds": nodeTags,
+				"url":       "https://www.gstatic.com/generate_204",
+				"interval":  "3m",
+				"tolerance": 50,
+			})
+			if err != nil {
+				return nil, warnings, err
+			}
+			outbounds = append(outbounds, auto)
 		}
 	}
 	direct, _ := json.Marshal(map[string]any{"type": "direct", "tag": "direct"})
@@ -220,8 +225,21 @@ func Build(in Input) ([]byte, []string, error) {
 	}
 
 	addresses := []string{"172.19.0.1/30"}
-	if !cfg.TUN.DisableIPv6 && !in.DisableIPv6 {
+	disableIPv6 := cfg.TUN.DisableIPv6 || in.DisableIPv6
+	if !disableIPv6 {
 		addresses = append(addresses, "fdfe:dcba:9876::1/126")
+	}
+	strictRoute := cfg.TUN.StrictRoute
+	dnsStrategy := "prefer_ipv4"
+	if disableIPv6 {
+		// Without an IPv6 address sing-tun installs no IPv6 route. On
+		// Windows strict_route also blocks IPv6 leaks through the physical
+		// interface, so force it for IPv4-only TUNs.
+		if !strictRoute {
+			warnings = append(warnings, "IPv6 отключён: strict_route включён для блокировки IPv6-утечек")
+		}
+		strictRoute = true
+		dnsStrategy = "ipv4_only"
 	}
 
 	doc := document{
@@ -232,7 +250,7 @@ func Build(in Input) ([]byte, []string, error) {
 		DNS: dnsOptions{
 			Servers:  dnsServers,
 			Final:    dnsFinal,
-			Strategy: "prefer_ipv4",
+			Strategy: dnsStrategy,
 		},
 		Inbounds: []inbound{{
 			Type:          "tun",
@@ -242,7 +260,7 @@ func Build(in Input) ([]byte, []string, error) {
 			MTU:           cfg.TUN.MTU,
 			DNSMode:       "hijack",
 			AutoRoute:     true,
-			StrictRoute:   cfg.TUN.StrictRoute,
+			StrictRoute:   strictRoute,
 			Stack:         cfg.TUN.Stack,
 		}},
 		Outbounds: outbounds,
@@ -358,22 +376,25 @@ func buildRules(cfg config.Config, final, exeName string, ruleSetPaths map[strin
 		rules = append(rules, rule{Action: "route", Outbound: "direct", IPIsPrivate: true})
 	}
 
-	if final != "direct" {
-		if domains := cleanDomains(cfg.Routing.ProxyDomains); len(domains) > 0 {
+	rulesMode := cfg.Routing.Mode == config.ModeRules
+	if rulesMode && final != "direct" {
+		if domains := cleanDomains(cfg.Routing.ProxyDomains, &warnings, "proxy"); len(domains) > 0 {
 			rules = append(rules, rule{Action: "route", Outbound: final, DomainSuffix: domains})
 		}
 		if cidrs := cleanCIDRs(cfg.Routing.ProxyCIDRs, &warnings, "proxy"); len(cidrs) > 0 {
 			rules = append(rules, rule{Action: "route", Outbound: final, IPCIDR: cidrs})
 		}
 	}
-	if domains := cleanDomains(cfg.Routing.DirectDomains); len(domains) > 0 {
-		rules = append(rules, rule{Action: "route", Outbound: "direct", DomainSuffix: domains})
-	}
-	if cidrs := cleanCIDRs(cfg.Routing.DirectCIDRs, &warnings, "direct"); len(cidrs) > 0 {
-		rules = append(rules, rule{Action: "route", Outbound: "direct", IPCIDR: cidrs})
+	if rulesMode {
+		if domains := cleanDomains(cfg.Routing.DirectDomains, &warnings, "direct"); len(domains) > 0 {
+			rules = append(rules, rule{Action: "route", Outbound: "direct", DomainSuffix: domains})
+		}
+		if cidrs := cleanCIDRs(cfg.Routing.DirectCIDRs, &warnings, "direct"); len(cidrs) > 0 {
+			rules = append(rules, rule{Action: "route", Outbound: "direct", IPCIDR: cidrs})
+		}
 	}
 
-	if cfg.Routing.BypassRU && final != "direct" {
+	if cfg.Routing.BypassRU && rulesMode && final != "direct" {
 		var tags []string
 		for _, tag := range []string{"geosite-ru", "geoip-ru"} {
 			if path, ok := ruleSetPaths[tag]; ok && path != "" {
@@ -391,7 +412,7 @@ func buildRules(cfg config.Config, final, exeName string, ruleSetPaths map[strin
 	return rules, used, warnings
 }
 
-func cleanDomains(lines []string) []string {
+func cleanDomains(lines []string, warnings *[]string, listName string) []string {
 	seen := make(map[string]struct{}, len(lines))
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
@@ -399,15 +420,16 @@ func cleanDomains(lines []string) []string {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		line = strings.TrimPrefix(line, ".")
-		if line == "" {
+		value := strings.TrimPrefix(line, ".")
+		if value == "" || strings.Contains(value, "://") || strings.ContainsAny(value, "/*\\ \t") {
+			*warnings = append(*warnings, fmt.Sprintf("список %s: %q не похоже на домен", listName, line))
 			continue
 		}
-		if _, ok := seen[line]; ok {
+		if _, ok := seen[value]; ok {
 			continue
 		}
-		seen[line] = struct{}{}
-		out = append(out, line)
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
 	return out
 }
@@ -427,7 +449,9 @@ func cleanCIDRs(lines []string, warnings *[]string, listName string) []string {
 			} else {
 				value = addr.String() + "/128"
 			}
-		} else if _, err := netip.ParsePrefix(line); err != nil {
+		} else if prefix, err := netip.ParsePrefix(line); err == nil {
+			value = prefix.Masked().String()
+		} else {
 			*warnings = append(*warnings, fmt.Sprintf("список %s: %q не является IP или CIDR", listName, line))
 			continue
 		}
@@ -441,16 +465,7 @@ func cleanCIDRs(lines []string, warnings *[]string, listName string) []string {
 }
 
 func withTag(raw json.RawMessage, tag string) (json.RawMessage, error) {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil, err
-	}
-	encoded, err := json.Marshal(tag)
-	if err != nil {
-		return nil, err
-	}
-	obj["tag"] = encoded
-	return json.Marshal(obj)
+	return jsonutil.SetObjectTag(raw, tag)
 }
 
 // CachePath returns the cache database path for a cache directory.

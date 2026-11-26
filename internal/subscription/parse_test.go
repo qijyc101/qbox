@@ -3,6 +3,8 @@ package subscription
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -184,6 +186,154 @@ func TestUnsupportedLinesAreReported(t *testing.T) {
 	}
 	if !strings.Contains(warnings[0], "строка 2") {
 		t.Fatalf("warning = %q", warnings[0])
+	}
+}
+
+func TestUppercaseScheme(t *testing.T) {
+	obj := parseOne(t, "VLESS://u@example.com:443?security=tls#Upper")
+	if obj["type"] != "vless" || obj["server"] != "example.com" {
+		t.Fatalf("outbound = %#v", obj)
+	}
+}
+
+func TestShadowsocksPluginRejected(t *testing.T) {
+	userinfo := base64.RawURLEncoding.EncodeToString([]byte("aes-256-gcm:pass"))
+	line := "ss://" + userinfo + "@1.2.3.4:8388?plugin=v2ray-plugin#SS"
+	nodes, warnings, err := Parse([]byte(line))
+	if err == nil || len(nodes) != 0 || len(warnings) != 1 {
+		t.Fatalf("nodes=%d warnings=%v err=%v", len(nodes), warnings, err)
+	}
+	if !strings.Contains(warnings[0], "плагин") {
+		t.Fatalf("warning = %q", warnings[0])
+	}
+}
+
+func TestVMessPercentEncodedPayload(t *testing.T) {
+	doc := `{"v":"2","ps":"VM","add":"vm.example.com","port":"443","id":"uuid","net":"ws","path":"/","tls":"tls"}`
+	encoded := base64.StdEncoding.EncodeToString([]byte(doc))
+	line := "vmess://" + strings.ReplaceAll(encoded, "=", "%3D")
+	obj := parseOne(t, line)
+	if obj["tag"] != "VM" || obj["server"] != "vm.example.com" {
+		t.Fatalf("outbound = %#v", obj)
+	}
+}
+
+func TestReservedTagIsRenamed(t *testing.T) {
+	nodes, _, err := Parse([]byte("vless://u@example.com:443?security=tls#auto"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodes[0].Tag == "auto" {
+		t.Fatalf("tag = %q", nodes[0].Tag)
+	}
+}
+
+func TestTagIsTruncated(t *testing.T) {
+	long := strings.Repeat("я", maxTagRunes+50)
+	nodes, _, err := Parse([]byte("vless://u@example.com:443?security=tls#" + url.QueryEscape(long)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len([]rune(nodes[0].Tag)); got > maxTagRunes {
+		t.Fatalf("tag length = %d", got)
+	}
+}
+
+func TestNodeLimit(t *testing.T) {
+	var builder strings.Builder
+	for i := 0; i < MaxNodes+5; i++ {
+		fmt.Fprintf(&builder, "vless://u@example.com:443?security=tls#n%d\n", i)
+	}
+	nodes, warnings, err := Parse([]byte(builder.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != MaxNodes {
+		t.Fatalf("nodes = %d", len(nodes))
+	}
+	if len(warnings) == 0 {
+		t.Fatal("no truncation warning")
+	}
+}
+
+func TestJSONOutboundWithoutServerIsSkipped(t *testing.T) {
+	doc := `{"outbounds":[{"type":"vless","tag":"bad","server_port":443,"uuid":"u"},{"type":"vless","tag":"ok","server":"example.com","server_port":443,"uuid":"u"}]}`
+	nodes, warnings, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Tag != "ok" || len(warnings) != 1 {
+		t.Fatalf("nodes=%+v warnings=%v", nodes, warnings)
+	}
+}
+
+func TestInvalidServerIsRejected(t *testing.T) {
+	nodes, warnings, err := Parse([]byte("vless://u@exa%20mple.com:443?security=tls#bad"))
+	if err == nil && len(nodes) != 0 {
+		t.Fatalf("nodes=%+v warnings=%v", nodes, warnings)
+	}
+}
+
+func TestJSONShadowsocksPluginRejected(t *testing.T) {
+	doc := `{"outbounds":[
+		{"type":"shadowsocks","tag":"bad","server":"example.com","server_port":8388,"method":"aes-256-gcm","password":"p","plugin":"evil"},
+		{"type":"shadowsocks","tag":"ok","server":"example.com","server_port":8388,"method":"aes-256-gcm","password":"p"}
+	]}`
+	nodes, warnings, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Tag != "ok" {
+		t.Fatalf("nodes=%+v", nodes)
+	}
+	if len(warnings) != 1 || !strings.Contains(strings.ToLower(warnings[0]), "плагин") {
+		t.Fatalf("warnings=%v", warnings)
+	}
+}
+
+func TestJSONTLSFilePathsRejected(t *testing.T) {
+	doc := `{"outbounds":[
+		{"type":"vless","tag":"bad","server":"example.com","server_port":443,"uuid":"u","tls":{"enabled":true,"certificate_path":"C:\\secret.pem"}},
+		{"type":"vless","tag":"ok","server":"example.com","server_port":443,"uuid":"u","tls":{"enabled":true}}
+	]}`
+	nodes, warnings, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Tag != "ok" {
+		t.Fatalf("nodes=%+v", nodes)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "certificate_path") {
+		t.Fatalf("warnings=%v", warnings)
+	}
+}
+
+func TestCleanTagDropsBidiControls(t *testing.T) {
+	if got := cleanTag("a\u202eb\u200b"); got != "ab" {
+		t.Fatalf("cleanTag = %q", got)
+	}
+}
+
+func TestMalformedURLErrorDoesNotLeakPassword(t *testing.T) {
+	nodes, warnings, err := Parse([]byte("trojan://SECRET@exa mple.com:443#x"))
+	if err == nil && len(nodes) > 0 {
+		t.Fatalf("nodes=%+v", nodes)
+	}
+	for _, warning := range warnings {
+		if strings.Contains(warning, "SECRET") {
+			t.Fatalf("password leaked: %q", warning)
+		}
+	}
+}
+
+func TestEmptyUsernameKeepsPassword(t *testing.T) {
+	obj := parseOne(t, "hysteria2://:pass@example.com:443#h")
+	if obj["password"] != "pass" {
+		t.Fatalf("password = %v", obj["password"])
+	}
+	obj = parseOne(t, "trojan://:pass@example.com:443#t")
+	if obj["password"] != "pass" {
+		t.Fatalf("password = %v", obj["password"])
 	}
 }
 

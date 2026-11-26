@@ -1,9 +1,13 @@
 package core
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
@@ -13,67 +17,73 @@ import (
 	"qbox/internal/model"
 )
 
-func TestPingOne(t *testing.T) {
+func fakeHTTPProxy(t *testing.T) int {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
-	go func() {
-		conn, err := listener.Accept()
-		if err == nil {
-			_ = conn.Close()
-		}
-	}()
-
-	address := listener.Addr().(*net.TCPAddr)
-	target := M.ParseSocksaddrHostPort("127.0.0.1", uint16(address.Port))
-	engine := New(Options{LogFile: t.TempDir() + "/ping.log"})
-	defer engine.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	result := engine.pingOne(ctx, config.Node{
-		Tag:      "node-direct",
-		Type:     "direct",
-		Server:   "127.0.0.1",
-		Port:     address.Port,
-		Outbound: json.RawMessage(`{"type":"direct","tag":"node-direct"}`),
-	}, target)
-	if result.Err != "" {
-		t.Fatalf("ping failed: %s", result.Err)
-	}
-	if result.Latency <= 0 {
-		t.Fatalf("latency = %v", result.Latency)
-	}
-}
-
-func TestPingStreamsResults(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
+	t.Cleanup(func() { _ = listener.Close() })
 	go func() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
 				return
 			}
-			_ = conn.Close()
+			go func() {
+				defer conn.Close()
+				request, err := http.ReadRequest(bufio.NewReader(conn))
+				if err != nil {
+					return
+				}
+				_ = request
+				_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+				_, _ = io.Copy(io.Discard, conn)
+			}()
 		}
 	}()
+	return listener.Addr().(*net.TCPAddr).Port
+}
 
-	address := listener.Addr().(*net.TCPAddr)
+func httpNode(t *testing.T, tag string, port int) config.Node {
+	t.Helper()
+	return config.Node{
+		Tag:      tag,
+		Type:     "http",
+		Server:   "127.0.0.1",
+		Port:     port,
+		Outbound: json.RawMessage(fmt.Sprintf(`{"type":"http","tag":%q,"server":"127.0.0.1","server_port":%d}`, tag, port)),
+	}
+}
+
+func TestPingOne(t *testing.T) {
+	proxyPort := fakeHTTPProxy(t)
+	target := M.ParseSocksaddrHostPort("example.com", 443)
+	engine := New(Options{LogFile: t.TempDir() + "/ping.log"})
+	defer engine.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result := engine.pingOne(ctx, httpNode(t, "node-http", proxyPort), target)
+	if result.Err != "" {
+		t.Fatalf("ping failed: %s", result.Err)
+	}
+	if result.Latency > time.Second {
+		t.Fatalf("latency = %v", result.Latency)
+	}
+}
+
+func TestPingStreamsResults(t *testing.T) {
+	proxyPort := fakeHTTPProxy(t)
 	previousTarget := pingTarget
-	pingTarget = M.ParseSocksaddrHostPort("127.0.0.1", uint16(address.Port))
+	pingTarget = M.ParseSocksaddrHostPort("example.com", 443)
 	defer func() { pingTarget = previousTarget }()
 
 	engine := New(Options{LogFile: t.TempDir() + "/ping.log"})
 	defer engine.Close()
 
 	nodes := []config.Node{
-		{Tag: "ok", Type: "direct", Outbound: json.RawMessage(`{"type":"direct","tag":"ok"}`)},
+		httpNode(t, "ok", proxyPort),
 		{Tag: "bad", Type: "nope", Outbound: json.RawMessage(`{"type":"nope","tag":"bad"}`)},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

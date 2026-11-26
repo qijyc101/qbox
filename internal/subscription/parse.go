@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"qbox/internal/config"
+	"qbox/internal/jsonutil"
 )
 
 // supportedTypes are the outbound types qbox can build from a subscription.
@@ -23,6 +25,13 @@ var supportedTypes = map[string]struct{}{
 	"socks":       {},
 	"http":        {},
 }
+
+const (
+	// MaxNodes bounds how many nodes one subscription can contribute.
+	MaxNodes = 3000
+	// maxTagRunes keeps tags readable and bounds config/UI growth.
+	maxTagRunes = 128
+)
 
 type outboundMeta struct {
 	Type       string `json:"type"`
@@ -43,7 +52,15 @@ func Parse(data []byte) ([]config.Node, []string, error) {
 	if text == "" {
 		return nil, nil, errors.New("пустое содержимое подписки")
 	}
-	return parseContent(text, 0)
+	nodes, warnings, err := parseContent(text, 0)
+	if err != nil {
+		return nil, warnings, err
+	}
+	if len(nodes) > MaxNodes {
+		warnings = append(warnings, fmt.Sprintf("подписка обрезана до %d нод", MaxNodes))
+		nodes = nodes[:MaxNodes]
+	}
+	return nodes, warnings, nil
 }
 
 func parseContent(text string, depth int) ([]config.Node, []string, error) {
@@ -92,9 +109,13 @@ func parseSingBoxJSON(data []byte) ([]config.Node, []string, error) {
 		return nil, nil, errors.New("в JSON подписки нет outbounds")
 	}
 
-	nodes := make([]config.Node, 0, len(doc.Outbounds))
+	nodes := make([]config.Node, 0, min(len(doc.Outbounds), MaxNodes+1))
 	var warnings []string
 	for i, raw := range doc.Outbounds {
+		if len(nodes) >= MaxNodes {
+			warnings = append(warnings, fmt.Sprintf("подписка обрезана до %d нод", MaxNodes))
+			break
+		}
 		var meta outboundMeta
 		if err := json.Unmarshal(raw, &meta); err != nil {
 			warnings = append(warnings, fmt.Sprintf("outbound %d: %v", i+1, err))
@@ -108,11 +129,22 @@ func parseSingBoxJSON(data []byte) ([]config.Node, []string, error) {
 			warnings = append(warnings, fmt.Sprintf("outbound %d (%s): нет адреса или порта", i+1, meta.Type))
 			continue
 		}
+		server, err := cleanServer(meta.Server)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("outbound %d (%s): %v", i+1, meta.Type, err))
+			continue
+		}
+		meta.Server = server
 		tag := cleanTag(meta.Tag)
 		if tag == "" {
 			tag = defaultTag(meta.Type, meta.Server, meta.ServerPort)
 		}
-		raw, err := setJSONTag(raw, tag)
+		raw, err := sanitizeJSONOutbound(raw, meta.Type)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("outbound %d: %v", i+1, err))
+			continue
+		}
+		raw, err = setJSONTag(raw, tag)
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("outbound %d: %v", i+1, err))
 			continue
@@ -133,16 +165,20 @@ func parseSingBoxJSON(data []byte) ([]config.Node, []string, error) {
 
 func parseLines(text string) ([]config.Node, []string) {
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	nodes := make([]config.Node, 0, len(lines))
+	nodes := make([]config.Node, 0, min(len(lines), MaxNodes+1))
 	var warnings []string
 	for i, line := range lines {
 		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
 			continue
 		}
-		if strings.Contains(line, "://") == false {
+		if !strings.Contains(line, "://") {
 			warnings = append(warnings, fmt.Sprintf("строка %d: не похожа на ссылку", i+1))
 			continue
+		}
+		if len(nodes) >= MaxNodes {
+			warnings = append(warnings, fmt.Sprintf("подписка обрезана до %d нод", MaxNodes))
+			break
 		}
 		outbound, err := parseURI(line)
 		if err != nil {
@@ -166,8 +202,9 @@ func nodeFromMap(outbound map[string]any) (config.Node, error) {
 	}
 	server, _ := outbound["server"].(string)
 	port := toInt(outbound["server_port"])
-	if server == "" {
-		return config.Node{}, errors.New("пустой адрес сервера")
+	server, err := cleanServer(server)
+	if err != nil {
+		return config.Node{}, err
 	}
 	if port <= 0 || port > 65535 {
 		return config.Node{}, fmt.Errorf("некорректный порт %d", port)
@@ -193,6 +230,7 @@ func nodeFromMap(outbound map[string]any) (config.Node, error) {
 
 func uniqueTags(nodes []config.Node) []config.Node {
 	used := make(map[string]struct{}, len(nodes))
+	next := make(map[string]int, len(nodes))
 	for i := range nodes {
 		base := cleanTag(nodes[i].Tag)
 		if base == "" {
@@ -202,11 +240,19 @@ func uniqueTags(nodes []config.Node) []config.Node {
 			base += " (нода)"
 		}
 		tag := base
-		for n := 2; ; n++ {
-			if _, exists := used[tag]; !exists {
-				break
+		if _, exists := used[tag]; exists {
+			n := next[base]
+			if n < 2 {
+				n = 2
 			}
-			tag = fmt.Sprintf("%s (%d)", base, n)
+			for {
+				tag = fmt.Sprintf("%s (%d)", base, n)
+				if _, ok := used[tag]; !ok {
+					break
+				}
+				n++
+			}
+			next[base] = n + 1
 		}
 		used[tag] = struct{}{}
 		nodes[i].Tag = tag
@@ -218,16 +264,56 @@ func uniqueTags(nodes []config.Node) []config.Node {
 }
 
 func setJSONTag(raw json.RawMessage, tag string) (json.RawMessage, error) {
+	return jsonutil.SetObjectTag(raw, tag)
+}
+
+// sanitizeJSONOutbound rejects outbound fields that would execute local
+// code or read local files. A subscription is untrusted input, while qbox
+// runs elevated to create TUN.
+func sanitizeJSONOutbound(raw json.RawMessage, typ string) (json.RawMessage, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, err
 	}
-	encoded, err := json.Marshal(tag)
-	if err != nil {
-		return nil, err
+	if typ == "shadowsocks" {
+		if plugin, ok := obj["plugin"]; ok {
+			var name string
+			if err := json.Unmarshal(plugin, &name); err != nil {
+				return nil, fmt.Errorf("plugin: %w", err)
+			}
+			if strings.TrimSpace(name) != "" {
+				return nil, errors.New("плагин Shadowsocks не разрешён в подписке")
+			}
+		}
 	}
-	obj["tag"] = encoded
-	return json.Marshal(obj)
+	if tlsRaw, ok := obj["tls"]; ok {
+		var tls map[string]json.RawMessage
+		if err := json.Unmarshal(tlsRaw, &tls); err == nil {
+			for _, field := range []string{"certificate_path", "client_certificate_path", "client_key_path"} {
+				if nonEmptyRawString(tls[field]) {
+					return nil, fmt.Errorf("tls.%s не разрешён в подписке", field)
+				}
+			}
+			if echRaw, ok := tls["ech"]; ok {
+				var ech map[string]json.RawMessage
+				if json.Unmarshal(echRaw, &ech) == nil && nonEmptyRawString(ech["config_path"]) {
+					return nil, errors.New("tls.ech.config_path не разрешён в подписке")
+				}
+			}
+		}
+	}
+	return raw, nil
+}
+
+func nonEmptyRawString(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false
+	}
+	return strings.TrimSpace(value) != ""
 }
 
 func decodeBase64Text(text string) ([]byte, bool) {
@@ -280,12 +366,24 @@ func cleanTag(tag string) string {
 		case '\r', '\n', '\t':
 			return ' '
 		}
-		if r < 0x20 {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		if r == '\u200b' || r == '\u200c' || r == '\u200d' || r == '\u200e' || r == '\u200f' ||
+			(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069') || r == '\ufeff' {
 			return -1
 		}
 		return r
 	}, tag)
-	return strings.TrimSpace(tag)
+	return strings.TrimSpace(truncateRunes(tag, maxTagRunes))
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
 }
 
 func defaultTag(typ, server string, port int) string {
@@ -293,7 +391,23 @@ func defaultTag(typ, server string, port int) string {
 		return typ
 	}
 	if port > 0 {
-		return fmt.Sprintf("%s %s:%d", typ, server, port)
+		return truncateRunes(fmt.Sprintf("%s %s:%d", typ, server, port), maxTagRunes)
 	}
-	return fmt.Sprintf("%s %s", typ, server)
+	return truncateRunes(fmt.Sprintf("%s %s", typ, server), maxTagRunes)
+}
+
+func cleanServer(server string) (string, error) {
+	server = strings.TrimSpace(server)
+	if server == "" {
+		return "", errors.New("пустой адрес сервера")
+	}
+	if len(server) > 253 {
+		return "", errors.New("слишком длинный адрес сервера")
+	}
+	for _, r := range server {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || strings.ContainsRune(`/\?#@`, r) {
+			return "", errors.New("некорректный адрес сервера")
+		}
+	}
+	return server, nil
 }

@@ -15,6 +15,7 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 
 	"qbox/internal/config"
+	"qbox/internal/jsonutil"
 	"qbox/internal/model"
 )
 
@@ -24,7 +25,7 @@ const (
 	pingConcurrency = 6
 )
 
-var pingTarget = M.ParseSocksaddrHostPort("www.gstatic.com", 443)
+var pingTarget = M.ParseSocksaddrHostPort("1.1.1.1", 443)
 
 // Ping measures the latency of every node through its proxy protocol. Each
 // node gets a short-lived sing-box instance without TUN or inbounds, so a
@@ -34,13 +35,23 @@ var pingTarget = M.ParseSocksaddrHostPort("www.gstatic.com", 443)
 // have been tested or the context is canceled.
 func (e *Engine) Ping(ctx context.Context, nodes []config.Node) <-chan model.PingResult {
 	out := make(chan model.PingResult, len(nodes))
-	if len(nodes) == 0 {
+	e.opMu.Lock()
+	closed := e.closed
+	e.opMu.Unlock()
+	if closed || len(nodes) == 0 {
 		close(out)
 		return out
 	}
 
 	go func() {
 		defer close(out)
+
+		canonCtx := include.Context(context.Background())
+		canonical := make([]config.Node, len(nodes))
+		canonErrors := make([]error, len(nodes))
+		for i := range nodes {
+			canonical[i], canonErrors[i] = canonicalizeNode(canonCtx, nodes[i])
+		}
 
 		jobs := make(chan int, len(nodes))
 		for i := range nodes {
@@ -58,7 +69,11 @@ func (e *Engine) Ping(ctx context.Context, nodes []config.Node) <-chan model.Pin
 			go func() {
 				defer wg.Done()
 				for i := range jobs {
-					result := e.pingWatched(ctx, nodes[i])
+					if canonErrors[i] != nil {
+						out <- model.PingResult{Tag: nodes[i].Tag, Err: canonErrors[i].Error()}
+						continue
+					}
+					result := e.pingWatched(ctx, canonical[i])
 					if result.Err != "" && ctx.Err() == nil {
 						e.logs.WriteMessage(log.LevelWarn, fmt.Sprintf("пинг %s: %s", result.Tag, result.Err))
 					}
@@ -134,7 +149,15 @@ func (e *Engine) pingOne(ctx context.Context, node config.Node, target M.Socksad
 		result.Err = err.Error()
 		return result
 	}
+	if !e.trackTemp(instance) {
+		_ = instance.Close()
+		result.Err = "движок закрыт"
+		return result
+	}
+	defer e.untrackTemp(instance)
+
 	if err := instance.Start(); err != nil {
+		_ = instance.Close()
 		result.Err = err.Error()
 		return result
 	}
@@ -160,14 +183,5 @@ func (e *Engine) pingOne(ctx context.Context, node config.Node, target M.Socksad
 }
 
 func withRawTag(raw json.RawMessage, tag string) (json.RawMessage, error) {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil, err
-	}
-	encoded, err := json.Marshal(tag)
-	if err != nil {
-		return nil, err
-	}
-	obj["tag"] = encoded
-	return json.Marshal(obj)
+	return jsonutil.SetObjectTag(raw, tag)
 }

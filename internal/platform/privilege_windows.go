@@ -1,8 +1,7 @@
 //go:build windows
 
 // Package platform wraps the few Windows-specific operations qbox needs:
-// checking for administrator rights, relaunching elevated, and preloading
-// the Wintun driver DLL before sing-box opens a TUN device.
+// checking for administrator rights and relaunching elevated.
 package platform
 
 import (
@@ -10,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -17,6 +17,24 @@ import (
 // IsElevated reports whether the current process runs with an elevated token.
 func IsElevated() bool {
 	return windows.GetCurrentProcessToken().IsElevated()
+}
+
+// WaitForProcessExit waits until the process with pid exits, or the timeout
+// expires. A process that is already gone counts as exited.
+func WaitForProcessExit(pid int, timeout time.Duration) error {
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		return nil
+	}
+	defer windows.CloseHandle(handle)
+	event, err := windows.WaitForSingleObject(handle, uint32(timeout.Milliseconds()))
+	if err != nil {
+		return err
+	}
+	if event == windows.WAIT_OBJECT_0 {
+		return nil
+	}
+	return errors.New("старый экземпляр qbox не завершился")
 }
 
 // RelaunchElevated starts the current executable with the "runas" verb.

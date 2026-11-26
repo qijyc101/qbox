@@ -14,6 +14,8 @@ import (
 	"github.com/sagernet/sing-box/option"
 	singjson "github.com/sagernet/sing/common/json"
 	"github.com/sagernet/sing/service"
+
+	"qbox/internal/config"
 )
 
 func TestBoxStartsAndStops(t *testing.T) {
@@ -66,12 +68,26 @@ func TestBoxStartsAndStops(t *testing.T) {
 	}
 }
 
+func TestEngineClosedIsTerminal(t *testing.T) {
+	engine := New(Options{LogFile: t.TempDir() + "/closed.log"})
+	engine.Close()
+	if err := engine.Start(config.Defaults(), nil); err == nil {
+		t.Fatal("Start succeeded after Close")
+	}
+	if err := engine.Restart(config.Defaults(), nil); err == nil {
+		t.Fatal("Restart succeeded after Close")
+	}
+}
+
 func TestIsIPv6ConfigError(t *testing.T) {
 	if !isIPv6ConfigError(errors.New("start inbound/tun[tun-in]: configure tun interface: set ipv6 address: Element not found.")) {
 		t.Fatal("ipv6 address error was not recognized")
 	}
 	if !isIPv6ConfigError(errors.New("set ipv6 dns: Element not found")) {
 		t.Fatal("ipv6 dns error was not recognized")
+	}
+	if !isIPv6ConfigError(errors.New("Element not found")) {
+		t.Fatal("element-not-found error was not recognized")
 	}
 	if isIPv6ConfigError(errors.New("permission denied")) {
 		t.Fatal("unrelated error was recognized as IPv6")
