@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="qbox qb strict square">
+  <defs>
+    <mask id="qb-square-q-cut">
+      <rect width="1024" height="1024" fill="#FFFFFF"/>
+      <rect x="212" y="412" width="140" height="200" rx="40" fill="#000000"/>
+    </mask>
+    <mask id="qb-square-b-cut">
+      <rect width="1024" height="1024" fill="#FFFFFF"/>
+      <rect x="672" y="412" width="140" height="200" rx="40" fill="#000000"/>
+    </mask>
+  </defs>
+
+  <rect width="1024" height="1024" rx="224" fill="#0E0E12"/>
+
+  <g fill="#FDFDFD">
+    <!-- q: bowl, counter, descender -->
+    <rect x="112" y="312" width="340" height="400" rx="100" mask="url(#qb-square-q-cut)"/>
+    <rect x="352" y="312" width="100" height="530"/>
+
+    <!-- b: ascender, bowl, counter -->
+    <rect x="572" y="182" width="100" height="530"/>
+    <rect x="572" y="312" width="340" height="400" rx="100" mask="url(#qb-square-b-cut)"/>
+  </g>
+</svg>
