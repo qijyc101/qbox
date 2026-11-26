@@ -74,11 +74,18 @@ type App struct {
 	cfg  config.Config
 	win  *mygo.Window
 
+	children map[childWindow]*mygo.Window
+	viewers  map[textViewer]*textView
+
 	done   chan struct{}
 	closed atomic.Bool
 	save   *time.Timer
 
-	page     int
+	settingsOpen    bool
+	panel           int
+	fileMenuOpen    bool
+	routingMenuOpen bool
+
 	state    model.State
 	stats    model.Stats
 	busy     bool
@@ -90,6 +97,11 @@ type App struct {
 	warn     string
 	dirty    bool
 	cfgRev   int
+
+	traffic     []trafficPoint
+	lastStats   model.Stats
+	lastSample  time.Time
+	connections []model.Connection
 
 	logs    []model.LogEntry
 	logRev  uint64
@@ -121,17 +133,21 @@ type App struct {
 
 	nodeList  ui.ListState
 	logList   ui.ListState
+	connList  ui.ListState
 	nodeIndex int
 
-	adding      bool
-	addName     string
-	addURL      string
-	confirmDel  string
-	directText  string
-	directCIDRs string
-	proxyText   string
-	proxyCIDRs  string
+	adding       bool
+	addName      string
+	addURL       string
+	subRenaming  string
+	subNameDraft string
+	subDeleting  string
+	directText   string
+	directCIDRs  string
+	proxyText    string
+	proxyCIDRs   string
 
+	profileCreating  bool
 	profileRenaming  bool
 	profileNameDraft string
 	profileDeleting  string
@@ -155,6 +171,7 @@ func New(deps Deps) *App {
 		state:        model.StateStopped,
 		logRev:       ^uint64(0),
 		pings:        make(map[string]model.PingResult),
+		viewers:      make(map[textViewer]*textView),
 		elevatedFlag: deps.Elevated(),
 	}
 	a.directText = config.JoinList(cfg.Routing.DirectDomains)
@@ -181,19 +198,24 @@ func (a *App) Open() {
 		}
 	}
 	a.win = mygo.NewWindow(mygo.WindowOptions{
-		Title:     "qbox",
-		Width:     1000,
-		Height:    720,
-		MinWidth:  760,
-		MinHeight: 560,
-		StateKey:  "main",
-		Content:   ui.View(a.view),
+		Title:           "qbox",
+		Width:           1120,
+		Height:          760,
+		MinWidth:        1000,
+		MinHeight:       600,
+		Frameless:       true,
+		CornerRadius:    12,
+		BackgroundColor: windowBackground,
+		StateKey:        "main",
+		Content:         ui.View(a.view),
 	})
+	a.applyWindowTheme()
 	a.win.OnClose(func(e *mygo.CloseEvent) {
 		if a.quitting || a.tray == nil {
 			return
 		}
 		e.PreventDefault()
+		a.closeChildren()
 		a.win.Hide()
 		if !a.trayHint {
 			a.trayHint = true
@@ -236,6 +258,7 @@ func (a *App) Shutdown() {
 	a.saveNow()
 	a.deps.Engine.Close()
 	a.restoreSystemProxy()
+	a.closeChildren()
 	if a.tray != nil {
 		a.tray.Destroy()
 		a.tray = nil
@@ -264,8 +287,22 @@ func (a *App) startPolling() {
 					logRev := a.deps.Engine.LogRevision()
 					proxyAddr := a.deps.Engine.ProxyAddress()
 
+					trafficChanged := a.sampleTraffic(time.Now(), stats)
+					connectionsChanged := false
+					if a.panel == 2 && !a.settingsOpen && state == model.StateRunning {
+						conns := a.deps.Engine.Connections()
+						if !sameConnections(a.connections, conns) {
+							a.connections = conns
+							connectionsChanged = true
+						}
+					} else if len(a.connections) > 0 {
+						a.connections = nil
+						connectionsChanged = true
+					}
+
 					changed := state != a.state || stats != a.stats || logRev != a.logRev ||
-						warning != a.warn || proxyAddr != a.proxyAddr
+						warning != a.warn || proxyAddr != a.proxyAddr ||
+						trafficChanged || connectionsChanged
 					if !changed {
 						return
 					}
@@ -280,9 +317,7 @@ func (a *App) startPolling() {
 						a.err = lastErr
 					}
 					a.updateTray()
-					if a.win != nil && a.win.IsVisible() {
-						a.win.Invalidate()
-					}
+					a.invalidate()
 				})
 			}
 		}
@@ -361,9 +396,7 @@ func (a *App) requestElevation() {
 		a.busy = false
 		a.busyTS = ""
 		a.err = "Не удалось сохранить настройки: " + err.Error()
-		if a.win != nil {
-			a.win.Invalidate()
-		}
+		a.invalidate()
 		return
 	}
 	args := []string{
@@ -376,9 +409,7 @@ func (a *App) requestElevation() {
 		a.busy = false
 		a.busyTS = ""
 		a.err = err.Error()
-		if a.win != nil {
-			a.win.Invalidate()
-		}
+		a.invalidate()
 		return
 	}
 	mygo.App.Quit()
@@ -398,7 +429,7 @@ func (a *App) startEngine() {
 		a.doStart(cfg, paths, rev)
 		return
 	}
-	a.win.Invalidate()
+	a.invalidate()
 	go a.doStart(cfg, paths, rev)
 }
 
@@ -430,9 +461,7 @@ func (a *App) doStart(cfg config.Config, paths map[string]string, rev int) {
 			a.notice = ""
 		}
 		a.refreshLogs()
-		if a.win != nil {
-			a.win.Invalidate()
-		}
+		a.invalidate()
 	})
 }
 
@@ -464,7 +493,7 @@ func (a *App) stop() {
 		a.doStop()
 		return
 	}
-	a.win.Invalidate()
+	a.invalidate()
 	go a.doStop()
 }
 
@@ -486,9 +515,7 @@ func (a *App) doStop() {
 			a.err = err.Error()
 		}
 		a.refreshLogs()
-		if a.win != nil {
-			a.win.Invalidate()
-		}
+		a.invalidate()
 		if a.elevateAfterStop {
 			a.elevateAfterStop = false
 			a.requestElevation()
@@ -519,7 +546,7 @@ func (a *App) restartNow() {
 		a.doRestart(cfg, paths, rev)
 		return
 	}
-	a.win.Invalidate()
+	a.invalidate()
 	go a.doRestart(cfg, paths, rev)
 }
 
@@ -556,9 +583,7 @@ func (a *App) doRestart(cfg config.Config, paths map[string]string, rev int) {
 			a.notice = ""
 		}
 		a.refreshLogs()
-		if a.win != nil {
-			a.win.Invalidate()
-		}
+		a.invalidate()
 		if a.elevateAfterStop {
 			a.elevateAfterStop = false
 			a.requestElevation()
@@ -611,6 +636,43 @@ func (a *App) addSubscription(name, rawURL string, nodes []config.Node, warnings
 		a.notice = fmt.Sprintf("Импортировано %d нод", len(nodes))
 	}
 	a.saveNow()
+	a.err = ""
+	a.closeChild(winAddSubscription)
+	a.invalidate()
+}
+
+func (a *App) renameSubscription() {
+	id := a.subRenaming
+	sub := a.cfg.Subscription(id)
+	if sub == nil {
+		a.err = "Подписка не найдена"
+		a.invalidate()
+		return
+	}
+	name := strings.TrimSpace(a.subNameDraft)
+	if name == "" {
+		a.err = "Название подписки не может быть пустым"
+		a.invalidate()
+		return
+	}
+	sub.Name = truncateRunes(name, 64)
+	a.subRenaming = ""
+	a.err = ""
+	a.notice = "Подписка переименована: «" + sub.Name + "»"
+	a.saveNow()
+	a.closeChild(winRenameSub)
+	a.invalidate()
+}
+
+func (a *App) confirmDeleteSubscription() {
+	id := a.subDeleting
+	a.subDeleting = ""
+	a.closeChild(winDeleteSub)
+	if id == "" {
+		return
+	}
+	a.deleteSubscription(id)
+	a.invalidate()
 }
 
 func (a *App) replaceSubscription(id string, nodes []config.Node, warnings []string) {
@@ -680,7 +742,7 @@ func (a *App) doImport(ctx context.Context, cancel context.CancelFunc, name, raw
 				a.err = ""
 				a.addSubscription(name, rawURL, nodes, warnings)
 				if a.win != nil {
-					a.win.Invalidate()
+					a.invalidate()
 				}
 			})
 			return
@@ -691,9 +753,7 @@ func (a *App) doImport(ctx context.Context, cancel context.CancelFunc, name, raw
 		a.workBusy = false
 		a.workTS = ""
 		a.err = "Импорт не удался: " + err.Error()
-		if a.win != nil {
-			a.win.Invalidate()
-		}
+		a.invalidate()
 	})
 }
 
@@ -728,7 +788,7 @@ func (a *App) refreshSubscription(id string) {
 					a.err = ""
 					a.replaceSubscription(id, nodes, warnings)
 					if a.win != nil {
-						a.win.Invalidate()
+						a.invalidate()
 					}
 				})
 				return
@@ -740,7 +800,7 @@ func (a *App) refreshSubscription(id string) {
 			a.workTS = ""
 			a.err = "Обновление не удалось: " + err.Error()
 			if a.win != nil {
-				a.win.Invalidate()
+				a.invalidate()
 			}
 		})
 	}
@@ -767,7 +827,7 @@ func (a *App) deleteSubscription(id string) {
 		}
 		a.cfg.SelectedNode = "auto"
 	}
-	a.confirmDel = ""
+	a.subDeleting = ""
 	a.nodeList = ui.ListState{}
 	a.cancelPing()
 	a.clearPings()
@@ -775,6 +835,8 @@ func (a *App) deleteSubscription(id string) {
 		a.markConfigChanged()
 	}
 	a.saveNow()
+	a.closeChild(winDeleteSub)
+	a.invalidate()
 	if a.state == model.StateRunning {
 		if len(a.cfg.ActiveNodes()) > 0 {
 			a.restartNow()
@@ -823,6 +885,7 @@ type nodeRow struct {
 	tag    string
 	title  string
 	detail string
+	typ    string
 	auto   bool
 }
 
@@ -832,22 +895,27 @@ func (a *App) nodeRows() []nodeRow {
 	rows = append(rows, nodeRow{
 		tag:    "auto",
 		title:  "Авто",
-		detail: "Выбор ноды по задержке (urltest)",
+		detail: "лучшая нода по задержке",
+		typ:    "auto",
 		auto:   true,
 	})
 	if sub == nil {
 		return rows
 	}
 	for _, node := range sub.Nodes {
-		title := node.Tag
-		detail := node.Type
-		if node.Server != "" {
-			detail += " · " + node.Server
-			if node.Port > 0 {
-				detail += fmt.Sprintf(":%d", node.Port)
-			}
+		detail := node.Server
+		if detail != "" && node.Port > 0 {
+			detail = fmt.Sprintf("%s:%d", detail, node.Port)
 		}
-		rows = append(rows, nodeRow{tag: node.Tag, title: title, detail: detail})
+		if detail == "" {
+			detail = "адрес не указан"
+		}
+		rows = append(rows, nodeRow{
+			tag:    node.Tag,
+			title:  node.Tag,
+			detail: detail,
+			typ:    node.Type,
+		})
 	}
 	return rows
 }
@@ -876,6 +944,119 @@ func (a *App) markConfigChanged() {
 	}
 }
 
+func (a *App) appearanceChanged() {
+	a.applyWindowTheme()
+	a.scheduleSave()
+	a.invalidate()
+}
+
+func (a *App) connectionSettingsChanged() {
+	a.markConfigChanged()
+	a.scheduleSave()
+	a.invalidate()
+}
+
+func (a *App) setThemeIndex(index int) {
+	switch index {
+	case 1:
+		a.cfg.Appearance.Theme = config.ThemeLight
+	case 2:
+		a.cfg.Appearance.Theme = config.ThemeDark
+	default:
+		a.cfg.Appearance.Theme = config.ThemeSystem
+	}
+	a.appearanceChanged()
+}
+
+func (a *App) themeIndex() int {
+	switch a.cfg.Appearance.Theme {
+	case config.ThemeLight:
+		return 1
+	case config.ThemeDark:
+		return 2
+	default:
+		return 0
+	}
+}
+
+func (a *App) setCornersIndex(index int) {
+	switch index {
+	case 0:
+		a.cfg.Appearance.Corners = config.CornersCompact
+	case 2:
+		a.cfg.Appearance.Corners = config.CornersRound
+	default:
+		a.cfg.Appearance.Corners = config.CornersSoft
+	}
+	a.appearanceChanged()
+}
+
+func (a *App) cornersIndex() int {
+	switch a.cfg.Appearance.Corners {
+	case config.CornersCompact:
+		return 0
+	case config.CornersRound:
+		return 2
+	default:
+		return 1
+	}
+}
+
+func (a *App) setAccent(name string) {
+	a.cfg.Appearance.Accent = name
+	a.appearanceChanged()
+}
+
+func (a *App) setTUNEnabled(enabled bool) {
+	if a.cfg.TUN.Enabled == enabled {
+		return
+	}
+	a.cfg.TUN.Enabled = enabled
+	if !enabled {
+		a.notice = "Системный прокси видят не все приложения. Для полного перехвата включите TUN."
+	}
+	a.connectionSettingsChanged()
+}
+
+func (a *App) setProxyPort(port int) {
+	if port < 0 || port > 65535 || (port != 0 && port < 1024) {
+		return
+	}
+	if a.cfg.Proxy.Port == port {
+		return
+	}
+	a.cfg.Proxy.Port = port
+	a.connectionSettingsChanged()
+}
+
+func (a *App) setMTU(mtu int) {
+	if mtu < 576 || mtu > 65535 {
+		return
+	}
+	if a.cfg.TUN.MTU == mtu {
+		return
+	}
+	a.cfg.TUN.MTU = mtu
+	a.connectionSettingsChanged()
+}
+
+func (a *App) refreshConnections() {
+	if a.state != model.StateRunning {
+		a.connections = nil
+		return
+	}
+	a.connections = a.deps.Engine.Connections()
+}
+
+func (a *App) copyText(text string) {
+	if a.win == nil || text == "" {
+		return
+	}
+	mygo.Clipboard.WriteText(text)
+	a.notice = "Скопировано в буфер обмена"
+	a.invalidate()
+}
+
 func (a *App) reloadRoutingFields() {
 	a.directText = config.JoinList(a.cfg.Routing.DirectDomains)
 	a.directCIDRs = config.JoinList(a.cfg.Routing.DirectCIDRs)
@@ -883,28 +1064,11 @@ func (a *App) reloadRoutingFields() {
 	a.proxyCIDRs = config.JoinList(a.cfg.Routing.ProxyCIDRs)
 }
 
-func (a *App) routingProfileNames() []string {
-	names := make([]string, 0, len(a.cfg.RoutingProfiles))
-	for _, profile := range a.cfg.RoutingProfiles {
-		names = append(names, profile.Name)
-	}
-	return names
-}
-
 func (a *App) activeRoutingProfileName() string {
 	if profile := a.cfg.ActiveRoutingProfile(); profile != nil {
 		return profile.Name
 	}
 	return ""
-}
-
-func (a *App) selectRoutingProfileByName(name string) {
-	for _, profile := range a.cfg.RoutingProfiles {
-		if profile.Name == name {
-			a.selectRoutingProfile(profile.ID)
-			return
-		}
-	}
 }
 
 func (a *App) selectRoutingProfile(id string) {
@@ -936,65 +1100,42 @@ func (a *App) selectRoutingProfile(id string) {
 		a.restartNow()
 	}
 	if a.win != nil {
-		a.win.Invalidate()
+		a.invalidate()
 	}
 }
 
-func (a *App) createRoutingProfile() {
-	name := fmt.Sprintf("Профиль %d", len(a.cfg.RoutingProfiles)+1)
+func (a *App) saveNewProfile() {
+	name := strings.TrimSpace(a.profileNameDraft)
+	if name == "" {
+		a.err = "Название профиля не может быть пустым"
+		a.invalidate()
+		return
+	}
 	id, err := a.cfg.AddRoutingProfile(name)
 	if err != nil {
 		a.err = err.Error()
-		if a.win != nil {
-			a.win.Invalidate()
-		}
+		a.invalidate()
 		return
 	}
 	a.cfg.SelectRoutingProfile(id)
 	a.reloadRoutingFields()
-	a.profileRenaming = true
+	a.profileCreating = false
 	a.profileDeleting = ""
 	if profile := a.cfg.ActiveRoutingProfile(); profile != nil {
 		a.profileNameDraft = profile.Name
 	}
 	a.err = ""
-	a.notice = "Создан профиль маршрутизации. Задайте имя и правила."
+	a.notice = "Создан профиль маршрутизации «" + a.activeRoutingProfileName() + "»"
 	a.saveNow()
-	if a.win != nil {
-		a.win.Invalidate()
-	}
-}
-
-func (a *App) beginRenameRoutingProfile() {
-	profile := a.cfg.ActiveRoutingProfile()
-	if profile == nil {
-		return
-	}
-	a.profileRenaming = true
-	a.profileNameDraft = profile.Name
-	a.profileDeleting = ""
-	a.err = ""
-	if a.win != nil {
-		a.win.Invalidate()
-	}
-}
-
-func (a *App) cancelRenameRoutingProfile() {
-	a.profileRenaming = false
-	a.profileNameDraft = a.activeRoutingProfileName()
-	a.err = ""
-	if a.win != nil {
-		a.win.Invalidate()
-	}
+	a.closeChild(winNewProfile)
+	a.invalidate()
 }
 
 func (a *App) saveRoutingProfileName() {
 	name, ok := a.cfg.RenameRoutingProfile(a.cfg.ActiveRoutingProfileID, a.profileNameDraft)
 	if !ok {
 		a.err = "Название профиля не может быть пустым"
-		if a.win != nil {
-			a.win.Invalidate()
-		}
+		a.invalidate()
 		return
 	}
 	a.profileRenaming = false
@@ -1002,35 +1143,8 @@ func (a *App) saveRoutingProfileName() {
 	a.err = ""
 	a.notice = "Профиль переименован: «" + name + "»"
 	a.saveNow()
-	if a.win != nil {
-		a.win.Invalidate()
-	}
-}
-
-func (a *App) requestDeleteRoutingProfile() {
-	if len(a.cfg.RoutingProfiles) <= 1 {
-		a.notice = "Нельзя удалить единственный профиль маршрутизации."
-		if a.win != nil {
-			a.win.Invalidate()
-		}
-		return
-	}
-	profile := a.cfg.ActiveRoutingProfile()
-	if profile == nil {
-		return
-	}
-	a.profileDeleting = profile.ID
-	a.profileRenaming = false
-	if a.win != nil {
-		a.win.Invalidate()
-	}
-}
-
-func (a *App) cancelDeleteRoutingProfile() {
-	a.profileDeleting = ""
-	if a.win != nil {
-		a.win.Invalidate()
-	}
+	a.closeChild(winRenameProfile)
+	a.invalidate()
 }
 
 func (a *App) confirmDeleteRoutingProfile() {
@@ -1039,6 +1153,7 @@ func (a *App) confirmDeleteRoutingProfile() {
 		return
 	}
 	a.profileDeleting = ""
+	a.closeChild(winDeleteProfile)
 	previous := a.cfg.Routing.Clone()
 	wasActive := id == a.cfg.ActiveRoutingProfileID
 	if !a.cfg.DeleteRoutingProfile(id) {
@@ -1047,9 +1162,7 @@ func (a *App) confirmDeleteRoutingProfile() {
 	if !wasActive {
 		a.notice = "Профиль маршрутизации удалён."
 		a.saveNow()
-		if a.win != nil {
-			a.win.Invalidate()
-		}
+		a.invalidate()
 		return
 	}
 	a.reloadRoutingFields()
@@ -1065,9 +1178,7 @@ func (a *App) confirmDeleteRoutingProfile() {
 	if changed && a.state == model.StateRunning {
 		a.restartNow()
 	}
-	if a.win != nil {
-		a.win.Invalidate()
-	}
+	a.invalidate()
 }
 
 func (a *App) clearPings() {
@@ -1088,7 +1199,7 @@ func (a *App) cancelPing() {
 	a.pinging = false
 	a.notice = "Пинг отменён"
 	if a.win != nil {
-		a.win.Invalidate()
+		a.invalidate()
 	}
 }
 
@@ -1132,7 +1243,7 @@ func (a *App) pingNodes() {
 				a.pings[value.Tag] = value
 				a.pingDone++
 				if a.win != nil {
-					a.win.Invalidate()
+					a.invalidate()
 				}
 			})
 		}
@@ -1144,7 +1255,7 @@ func (a *App) pingNodes() {
 			a.pingCancel = nil
 			a.notice = fmt.Sprintf("Пинг: %d из %d ответили", ok, len(work))
 			if a.win != nil {
-				a.win.Invalidate()
+				a.invalidate()
 			}
 		})
 	}
@@ -1201,7 +1312,7 @@ func (a *App) updateRuleSet(tag string) {
 				a.markConfigChanged()
 			}
 			if a.win != nil {
-				a.win.Invalidate()
+				a.invalidate()
 			}
 		})
 	}
@@ -1240,7 +1351,7 @@ func (a *App) updateAllRuleSets() {
 				a.markConfigChanged()
 			}
 			if a.win != nil {
-				a.win.Invalidate()
+				a.invalidate()
 			}
 		})
 	}
@@ -1336,7 +1447,7 @@ func (a *App) setStack(index int) {
 	default:
 		a.cfg.TUN.Stack = config.StackMixed
 	}
-	a.routingChanged()
+	a.connectionSettingsChanged()
 }
 
 func (a *App) logLevelIndex() int {
@@ -1359,7 +1470,7 @@ func (a *App) setLogLevel(index int) {
 	default:
 		a.cfg.LogLevel = "info"
 	}
-	a.routingChanged()
+	a.connectionSettingsChanged()
 }
 
 func (a *App) logLines() []model.LogEntry {

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -234,24 +235,22 @@ func TestViewAndStart(t *testing.T) {
 	eng := &fakeEngine{state: model.StateStopped}
 	a := newApp(t, cfg, eng, fakeFetcher{})
 
-	tt := ui.NewTester(a.view, 1000, 720)
-	if !tt.HasText("Подключение") || !tt.HasText("qbox") {
+	tt := ui.NewTester(a.view, 1100, 760)
+	if !tt.HasText("Подписки") || !tt.HasText("Ноды") || !tt.HasText("Настройки") {
 		t.Fatalf("texts = %q", tt.Texts())
+	}
+	if !tt.HasText("one") {
+		t.Fatalf("node not shown: %q", tt.Texts())
 	}
 	if err := tt.Click("Подключиться"); err != nil {
 		t.Fatal(err)
 	}
+	tt.Frame()
 	if eng.started != 1 {
 		t.Fatalf("start calls = %d", eng.started)
 	}
 	if !tt.HasText("Подключено") {
 		t.Fatalf("state not shown: %q", tt.Texts())
-	}
-	if err := tt.Click("Серверы"); err != nil {
-		t.Fatal(err)
-	}
-	if !tt.HasText("one") {
-		t.Fatalf("node not shown: %q", tt.Texts())
 	}
 }
 
@@ -259,25 +258,28 @@ func TestNavigation(t *testing.T) {
 	cfg := testConfig(t, testNode(t, testVLESS))
 	eng := &fakeEngine{state: model.StateStopped}
 	a := newApp(t, cfg, eng, fakeFetcher{})
-	tt := ui.NewTester(a.view, 1000, 720)
+	tt := ui.NewTester(a.view, 1100, 760)
 
-	if err := tt.Click("Серверы"); err != nil {
+	if err := tt.Click("Настройки"); err != nil {
 		t.Fatal(err)
 	}
+	tt.Frame()
+	if !tt.HasText("Внешний вид") || !tt.HasText("Режим TUN") {
+		t.Fatalf("settings texts = %q", tt.Texts())
+	}
+	if err := tt.Click("Назад"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
 	if !tt.HasText("Подписки") {
-		t.Fatalf("texts = %q", tt.Texts())
+		t.Fatalf("home texts = %q", tt.Texts())
 	}
 	if err := tt.Click("Маршрутизация"); err != nil {
 		t.Fatal(err)
 	}
-	if !tt.HasText("Обход РФ") || !tt.HasText("Профили маршрутизации") || !tt.HasText("Основной") {
-		t.Fatalf("texts = %q", tt.Texts())
-	}
-	if err := tt.Click("Настройки"); err != nil {
-		t.Fatal(err)
-	}
-	if !tt.HasText("Strict route") {
-		t.Fatalf("texts = %q", tt.Texts())
+	tt.Frame()
+	if !tt.HasText("Просмотр всех маршрутов…") || !tt.HasText("Основной") {
+		t.Fatalf("routing menu = %q", tt.Texts())
 	}
 }
 
@@ -307,21 +309,18 @@ func TestRoutingProfiles(t *testing.T) {
 	}
 
 	a.cfg.Routing.Mode = config.ModeGlobal
-	a.createRoutingProfile()
+	a.openNewProfile()
+	a.profileNameDraft = "Работа"
+	a.saveNewProfile()
 	secondID := a.cfg.ActiveRoutingProfileID
 	if secondID == firstID || len(a.cfg.RoutingProfiles) != 2 {
 		t.Fatalf("profiles = %+v active=%q", a.cfg.RoutingProfiles, a.cfg.ActiveRoutingProfileID)
-	}
-	if !a.profileRenaming {
-		t.Fatal("new profile is not ready for renaming")
 	}
 	if a.cfg.RoutingProfile(firstID).Routing.Mode != config.ModeGlobal {
 		t.Fatalf("first profile lost the edit: %+v", a.cfg.RoutingProfile(firstID).Routing)
 	}
 
 	a.setMode(2) // Direct for the second profile.
-	a.profileNameDraft = "Работа"
-	a.saveRoutingProfileName()
 	if got := a.cfg.RoutingProfile(secondID); got == nil || got.Name != "Работа" || got.Routing.Mode != config.ModeDirect {
 		t.Fatalf("second profile = %+v", got)
 	}
@@ -338,7 +337,14 @@ func TestRoutingProfiles(t *testing.T) {
 		t.Fatal("profile switch did not restart the engine")
 	}
 
-	a.requestDeleteRoutingProfile()
+	a.openRenameProfile()
+	a.profileNameDraft = "Личная"
+	a.saveRoutingProfileName()
+	if a.cfg.ActiveRoutingProfile().Name != "Личная" {
+		t.Fatalf("rename = %q", a.cfg.ActiveRoutingProfile().Name)
+	}
+
+	a.openDeleteProfile()
 	if a.profileDeleting == "" {
 		t.Fatal("delete was not requested")
 	}
@@ -352,21 +358,22 @@ func TestRoutingProfileSelectUI(t *testing.T) {
 	cfg := testConfig(t, testNode(t, testVLESS))
 	eng := &fakeEngine{state: model.StateStopped}
 	a := newApp(t, cfg, eng, fakeFetcher{})
-	a.createRoutingProfile()
+	a.openNewProfile()
 	a.profileNameDraft = "Работа"
-	a.saveRoutingProfileName()
-	a.page = 2
+	a.saveNewProfile()
 
-	tt := ui.NewTester(a.view, 1000, 720)
-	if !tt.HasText("Работа") {
-		t.Fatalf("profiles not shown: %q", tt.Texts())
-	}
-	if err := tt.Click("Работа"); err != nil {
+	tt := ui.NewTester(a.view, 1100, 760)
+	if err := tt.Click("Маршрутизация"); err != nil {
 		t.Fatal(err)
+	}
+	tt.Frame()
+	if !tt.HasText("Работа") || !tt.HasText("Основной") {
+		t.Fatalf("profiles not shown: %q", tt.Texts())
 	}
 	if err := tt.Click("Основной"); err != nil {
 		t.Fatal(err)
 	}
+	tt.Frame()
 	if a.activeRoutingProfileName() != "Основной" {
 		t.Fatalf("active profile = %q", a.activeRoutingProfileName())
 	}
@@ -378,13 +385,11 @@ func TestPingNodes(t *testing.T) {
 	eng := &fakeEngine{state: model.StateStopped}
 	a := newApp(t, cfg, eng, fakeFetcher{})
 
-	tt := ui.NewTester(a.view, 1000, 720)
-	if err := tt.Click("Серверы"); err != nil {
+	tt := ui.NewTester(a.view, 1100, 760)
+	if err := tt.Click("Пинг"); err != nil {
 		t.Fatal(err)
 	}
-	if err := tt.Click("Пинг всех"); err != nil {
-		t.Fatal(err)
-	}
+	tt.Frame()
 	if eng.pinged != 1 {
 		t.Fatalf("ping calls = %d", eng.pinged)
 	}
@@ -452,9 +457,74 @@ func TestDeleteSubscription(t *testing.T) {
 	cfg := testConfig(t, testNode(t, testVLESS))
 	eng := &fakeEngine{state: model.StateStopped}
 	a := newApp(t, cfg, eng, fakeFetcher{})
-	a.deleteSubscription("sub-1")
+	a.openDeleteSubscription("sub-1")
+	if a.subDeleting == "" {
+		t.Fatal("delete was not requested")
+	}
+	a.confirmDeleteSubscription()
 	if len(a.cfg.Subscriptions) != 0 || a.cfg.ActiveSubscription != "" {
 		t.Fatalf("cfg = %+v", a.cfg)
+	}
+}
+
+func TestRenameSubscription(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	eng := &fakeEngine{state: model.StateStopped}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	a.openRenameSubscription("sub-1")
+	a.subNameDraft = "  Работа  "
+	a.renameSubscription()
+	if a.cfg.Subscription("sub-1").Name != "Работа" {
+		t.Fatalf("name = %q", a.cfg.Subscription("sub-1").Name)
+	}
+}
+
+func TestAppearanceSettings(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	eng := &fakeEngine{state: model.StateStopped}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	a.setThemeIndex(2)
+	a.setAccent(config.AccentViolet)
+	a.setCornersIndex(0)
+	if a.cfg.Appearance.Theme != config.ThemeDark ||
+		a.cfg.Appearance.Accent != config.AccentViolet ||
+		a.cfg.Appearance.Corners != config.CornersCompact {
+		t.Fatalf("appearance = %+v", a.cfg.Appearance)
+	}
+	if a.themeIndex() != 2 || a.cornersIndex() != 0 {
+		t.Fatal("appearance indexes are wrong")
+	}
+}
+
+func TestTrafficHistory(t *testing.T) {
+	a := newApp(t, testConfig(t, testNode(t, testVLESS)), &fakeEngine{state: model.StateStopped}, fakeFetcher{})
+	now := time.Now()
+	a.resetTraffic(model.Stats{Up: 100, Down: 1000})
+	a.lastSample = now
+	if !a.sampleTraffic(now.Add(2*time.Second), model.Stats{Up: 300, Down: 5000}) {
+		t.Fatal("no sample after a second")
+	}
+	if len(a.traffic) != 1 {
+		t.Fatalf("traffic = %+v", a.traffic)
+	}
+	if a.traffic[0].Up != 100 || a.traffic[0].Down != 2000 {
+		t.Fatalf("rates = %+v", a.traffic[0])
+	}
+}
+
+func TestConnectionsView(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	eng := &fakeEngine{state: model.StateRunning, conns: []model.Connection{{
+		ID: "c1", Host: "example.com", Destination: "example.com:443",
+		Network: "tcp", Outbound: "node1", CreatedAt: time.Now(),
+	}}}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	a.state = model.StateRunning
+	a.panel = 2
+	a.refreshConnections()
+	tt := ui.NewTester(a.view, 1100, 760)
+	if !tt.HasText("example.com") {
+		t.Fatalf("connection not shown: %q", tt.Texts())
 	}
 }
 
@@ -471,16 +541,6 @@ func TestBeforeQuitStopsEngine(t *testing.T) {
 	}
 	if eng.stopped == 0 {
 		t.Fatal("engine was not stopped")
-	}
-}
-
-func TestDisplayURLRedacts(t *testing.T) {
-	got := displayURL("https://user:pass@example.com/sub/TOKEN?token=SECRET")
-	if strings.Contains(got, "TOKEN") || strings.Contains(got, "SECRET") || strings.Contains(got, "user") {
-		t.Fatalf("displayURL = %q", got)
-	}
-	if got != "https://example.com/…" {
-		t.Fatalf("displayURL = %q", got)
 	}
 }
 
@@ -619,5 +679,43 @@ func TestTUNModeDoesNotTouchSystemProxy(t *testing.T) {
 	a.doStart(cfg, nil, 0)
 	if proxy.enabled != 0 || proxy.restored != 0 {
 		t.Fatalf("system proxy calls = %+v", proxy)
+	}
+}
+
+func TestConfigViewer(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	a := newApp(t, cfg, &fakeEngine{state: model.StateStopped}, fakeFetcher{})
+	a.saveNow()
+	view := a.loadTextViewer(viewerConfig)
+	if view.Err != "" {
+		t.Fatal(view.Err)
+	}
+	if !strings.Contains(view.Text, `"version"`) || !strings.Contains(view.Text, `"routing"`) {
+		t.Fatalf("config viewer text = %q", view.Text)
+	}
+}
+
+func TestHomeLayoutWithManyNodes(t *testing.T) {
+	nodes := make([]config.Node, 0, 15)
+	for i := 0; i < 15; i++ {
+		nodes = append(nodes, testNode(t, fmt.Sprintf(
+			"vless://11111111-1111-1111-1111-11111111111%x@node%d.example:443?security=tls#node%d",
+			i, i, i)))
+	}
+	cfg := testConfig(t, nodes...)
+	a := newApp(t, cfg, &fakeEngine{state: model.StateStopped}, fakeFetcher{})
+	tt := ui.NewTester(a.view, 1000, 684)
+	tt.Frame()
+
+	button, ok := tt.Find("Добавить подписку")
+	if !ok {
+		t.Fatal("the add subscription button is missing")
+	}
+	if button.H < 20 || button.Y+button.H > 684 {
+		t.Fatalf("the add subscription button does not fit: %+v", button)
+	}
+	footer, ok := tt.Find("60 секунд")
+	if !ok || footer.Y+footer.H > 684 {
+		t.Fatalf("the traffic footer does not fit: %+v", footer)
 	}
 }
