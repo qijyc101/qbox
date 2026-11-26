@@ -66,11 +66,15 @@ func main() {
 	if !mygo.App.RequestSingleInstanceLock() {
 		return
 	}
+	mygo.App.OnSecondInstance(func([]string, string) {
+		instance.ShowWindow()
+	})
 	mygo.App.WhenReady(instance.Open)
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
-		instance.Shutdown()
+		instance.BeforeQuit()
 	})
 	if err := mygo.App.Run(); err != nil {
+		instance.Shutdown()
 		log.Fatal(err)
 	}
 }

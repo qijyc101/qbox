@@ -89,6 +89,11 @@ type App struct {
 	pingGen    int
 	pingCancel context.CancelFunc
 
+	tray        *mygo.Tray
+	trayConnect *mygo.MenuItem
+	trayHint    bool
+	quitting    bool
+
 	nodeList  ui.ListState
 	logList   ui.ListState
 	nodeIndex int
@@ -145,10 +150,30 @@ func (a *App) Open() {
 		StateKey:  "main",
 		Content:   ui.View(a.view),
 	})
+	a.win.OnClose(func(e *mygo.CloseEvent) {
+		if a.quitting || a.tray == nil {
+			return
+		}
+		e.PreventDefault()
+		a.win.Hide()
+		if !a.trayHint {
+			a.trayHint = true
+			a.notice = "qbox продолжает работать в трее. Выход — в меню значка qbox."
+		}
+	})
 	a.startPolling()
+	a.initTray()
 	if a.deps.Autostart && a.deps.Elevated() {
 		a.startEngine()
 	}
+}
+
+// BeforeQuit runs synchronously in the quit sequence, before windows
+// close. It stops the engine so TUN routes and the adapter are removed
+// cleanly, then lets the windows close.
+func (a *App) BeforeQuit() {
+	a.quitting = true
+	a.Shutdown()
 }
 
 // Shutdown stops the engine and saves the configuration.
@@ -165,6 +190,11 @@ func (a *App) Shutdown() {
 	}
 	a.saveNow()
 	_ = a.deps.Engine.Stop()
+	if a.tray != nil {
+		a.tray.Destroy()
+		a.tray = nil
+		a.trayConnect = nil
+	}
 }
 
 func (a *App) startPolling() {
@@ -197,6 +227,7 @@ func (a *App) startPolling() {
 					if state == model.StateError && lastErr != "" {
 						a.err = lastErr
 					}
+					a.updateTray()
 					if a.win != nil {
 						a.win.Invalidate()
 					}
@@ -288,6 +319,7 @@ func (a *App) doStart(cfg config.Config, paths map[string]string) {
 		a.busy = false
 		a.busyTS = ""
 		a.state = a.deps.Engine.State()
+		a.updateTray()
 		if err != nil {
 			a.err = err.Error()
 		} else {
@@ -322,6 +354,7 @@ func (a *App) doStop() {
 		a.busy = false
 		a.busyTS = ""
 		a.state = a.deps.Engine.State()
+		a.updateTray()
 		if err != nil {
 			a.err = err.Error()
 		}
@@ -355,6 +388,7 @@ func (a *App) doRestart(cfg config.Config, paths map[string]string) {
 		a.busy = false
 		a.busyTS = ""
 		a.state = a.deps.Engine.State()
+		a.updateTray()
 		if err != nil {
 			a.err = err.Error()
 		} else {

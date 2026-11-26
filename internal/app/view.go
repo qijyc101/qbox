@@ -117,6 +117,9 @@ func (a *App) connectionPage(c *ui.Context) {
 		if !a.elevated() {
 			ui.Text(c, "TUN требует прав администратора: при подключении Windows покажет запрос UAC.").TextColor(t.Warning)
 		}
+		if a.tray != nil {
+			ui.Text(c, "Закрытие окна сворачивает qbox в трей; выход — через меню значка qbox.").TextColor(t.TextMuted)
+		}
 		if len(a.cfg.ActiveNodes()) == 0 {
 			ui.Text(c, "Нет нод. Откройте «Серверы» и добавьте подписку.").TextColor(t.TextMuted)
 		}

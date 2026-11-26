@@ -311,6 +311,22 @@ func TestDeleteSubscription(t *testing.T) {
 	}
 }
 
+func TestBeforeQuitStopsEngine(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	eng := &fakeEngine{state: model.StateRunning}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	a.BeforeQuit()
+	if !a.quitting {
+		t.Fatal("quitting flag is not set")
+	}
+	if !a.closed.Load() {
+		t.Fatal("app is not closed")
+	}
+	if eng.stopped == 0 {
+		t.Fatal("engine was not stopped")
+	}
+}
+
 func TestSavesConfiguration(t *testing.T) {
 	cfg := testConfig(t, testNode(t, testVLESS))
 	eng := &fakeEngine{state: model.StateStopped}
