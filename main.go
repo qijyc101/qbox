@@ -1,59 +1,85 @@
 package main
 
 import (
-	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 
 	"github.com/egoist/mygo"
-	"github.com/egoist/mygo/ui"
+
+	"qbox/internal/app"
+	"qbox/internal/config"
+	"qbox/internal/core"
+	"qbox/internal/rulesets"
+	"qbox/internal/subscription"
 )
 
-// app is the state the window shows. Its view builds the interface from
-// it, on the main thread, whenever the window needs a frame: after input,
-// after Window.Update, and while something animates.
-type app struct {
-	name  string
-	count int
-}
-
-func (a *app) view(c *ui.Context) {
-	t := c.Theme()
-	ui.Column(c).Fill().Center().Gap(16).Padding(24).Children(func() {
-		ui.Text(c, "qbox").FontSize(26).Bold()
-		ui.TextInput(c, &a.name).Placeholder("Your name").Label("Name").Width(240)
-		greeting := "Hello!"
-		if a.name != "" {
-			greeting = fmt.Sprintf("Hello, %s!", a.name)
-		}
-		ui.Text(c, greeting).TextColor(t.TextMuted)
-		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-			if ui.Button(c, "−").Width(44).Clicked() {
-				a.count--
-			}
-			ui.Textf(c, "%d", a.count).FontSize(20).Width(48).TextAlign(ui.Center)
-			if ui.PrimaryButton(c, "+").Width(44).Clicked() {
-				a.count++
-			}
-		})
-	})
-}
-
 func main() {
-	a := &app{}
-	mygo.App.WhenReady(func() {
-		mygo.NewWindow(mygo.WindowOptions{
-			Title:     "qbox",
-			Width:     480,
-			Height:    360,
-			MinWidth:  320,
-			MinHeight: 280,
-			// Opens where the user left it last time.
-			StateKey: "main",
-			// The window shows the interface MyGo draws, not a web page.
-			Content: ui.View(a.view),
-		})
+	mygo.App.SetName("qbox")
+
+	dir, err := config.DefaultDir()
+	if err != nil {
+		log.Fatal("каталог конфигурации: ", err)
+	}
+	store, err := config.NewStore(dir)
+	if err != nil {
+		log.Fatal("хранилище конфигурации: ", err)
+	}
+	cfg, cfgErr := store.Load()
+
+	cacheDir, err := config.CacheDir()
+	if err != nil {
+		cacheDir = filepath.Join(dir, "cache")
+	}
+	logDir, err := config.LogDir()
+	if err != nil {
+		logDir = filepath.Join(dir, "logs")
+	}
+
+	engine := core.New(core.Options{
+		CacheFile: filepath.Join(cacheDir, "cache.db"),
+		LogFile:   filepath.Join(logDir, "qbox.log"),
+	})
+	defer engine.Close()
+
+	rules := rulesets.New(filepath.Join(cacheDir, "rulesets"))
+
+	resourcesDir, _ := mygo.App.Path(mygo.PathResources)
+
+	deps := app.Deps{
+		Config:       cfg,
+		Store:        store,
+		Engine:       engine,
+		Fetcher:      subscription.NewClient(),
+		RuleSets:     rules,
+		ResourcesDir: resourcesDir,
+		ConfigPath:   store.Path(),
+		CacheDir:     cacheDir,
+		Autostart:    hasArg("--autostart"),
+	}
+	if cfgErr != nil {
+		deps.ConfigWarning = cfgErr.Error()
+	}
+
+	instance := app.New(deps)
+
+	if !mygo.App.RequestSingleInstanceLock() {
+		return
+	}
+	mygo.App.WhenReady(instance.Open)
+	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
+		instance.Shutdown()
 	})
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func hasArg(want string) bool {
+	for _, arg := range os.Args[1:] {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }

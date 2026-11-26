@@ -1,8 +1,8 @@
 {
   "name": "qbox",
-  "identifier": "com.example.qbox",
+  "identifier": "io.github.qijyc101.qbox",
   "version": "0.1.0",
   "out": "build",
-  "ios": { "minimumSystemVersion": "17.0" },
-  "android": { "minSdk": 26 }
+  "copyright": "Copyright (C) 2026 qbox contributors",
+  "publisher": "qbox contributors"
 }

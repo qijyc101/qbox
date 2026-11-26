@@ -1,0 +1,60 @@
+qbox
+Copyright (C) 2026 qbox contributors
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option)
+any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <https://www.gnu.org/licenses/>.
+
+---
+
+Third-party components
+======================
+
+sing-box
+--------
+Copyright (C) 2022 by nekohasekai <contact-sagernet@sekai.icu>
+https://github.com/SagerNet/sing-box
+
+Licensed under the GNU General Public License version 3 or later, with the
+additional condition that no derivative work may use the name "sing-box" or
+imply association with the sing-box project without prior consent.
+
+qbox links sing-box as a Go library; the combined work is distributed under
+GPLv3. qbox is not affiliated with or endorsed by the sing-box project.
+
+MyGo
+----
+Copyright (C) MyGo contributors
+https://github.com/egoist/mygo
+
+Licensed under the MIT License.
+
+Wintun
+------
+Copyright (C) 2017-2021 WireGuard LLC
+https://www.wintun.net/
+
+The official prebuilt, signed wintun.dll files are redistributed unmodified
+alongside qbox under the license included in the official Wintun 0.14.1
+archive. They are used only through the documented Wintun API by sing-tun.
+
+Rule-set data
+-------------
+Rule-sets are downloaded at runtime from:
+- https://github.com/SagerNet/sing-geosite
+- https://github.com/SagerNet/sing-geoip
+
+Please refer to those repositories for the licenses of the generated data.
+
+Go module dependencies
+----------------------
+All Go dependencies are listed in go.mod/go.sum and retain their respective
+licenses.

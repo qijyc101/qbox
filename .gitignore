@@ -1,3 +1,11 @@
 /build/
 /.mygo/
+/.gotmp/
 mygo_windows_*.syso
+*.exe
+*.test
+*.log
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
