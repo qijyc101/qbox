@@ -1,4 +1,5 @@
 /build/
+/build-*/
 /.mygo/
 /.gotmp/
 mygo_windows_*.syso

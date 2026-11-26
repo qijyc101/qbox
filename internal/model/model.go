@@ -23,6 +23,14 @@ type Stats struct {
 	Connections int
 }
 
+// PingResult is the latency of one node, measured through its proxy
+// protocol.
+type PingResult struct {
+	Tag     string
+	Latency time.Duration
+	Err     string
+}
+
 // LogEntry is one line of the engine log shown by the UI.
 type LogEntry struct {
 	Time    time.Time

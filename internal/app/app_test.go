@@ -22,6 +22,7 @@ type fakeEngine struct {
 	logs     []model.LogEntry
 	started  int
 	stopped  int
+	pinged   int
 	startErr error
 	stopErr  error
 	cfg      config.Config
@@ -75,6 +76,17 @@ func (f *fakeEngine) ClearLogs() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.logs = nil
+}
+
+func (f *fakeEngine) Ping(ctx context.Context, nodes []config.Node) []model.PingResult {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pinged++
+	results := make([]model.PingResult, len(nodes))
+	for i, node := range nodes {
+		results[i] = model.PingResult{Tag: node.Tag, Latency: 123 * time.Millisecond}
+	}
+	return results
 }
 
 type fakeRules struct {
@@ -210,6 +222,33 @@ func TestNodeSelection(t *testing.T) {
 	}
 	if eng.stopped != 0 {
 		t.Fatal("restart was attempted while stopped")
+	}
+}
+
+func TestPingNodes(t *testing.T) {
+	second := testNode(t, "vless://22222222-2222-2222-2222-222222222222@two.example:443?security=tls#two")
+	cfg := testConfig(t, testNode(t, testVLESS), second)
+	eng := &fakeEngine{state: model.StateStopped}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+
+	tt := ui.NewTester(a.view, 1000, 720)
+	if err := tt.Click("Серверы"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.Click("Пинг всех"); err != nil {
+		t.Fatal(err)
+	}
+	if eng.pinged != 1 {
+		t.Fatalf("ping calls = %d", eng.pinged)
+	}
+	if a.pinging {
+		t.Fatal("still pinging")
+	}
+	if len(a.pings) != 2 {
+		t.Fatalf("pings = %+v", a.pings)
+	}
+	if !tt.HasText("123 мс") {
+		t.Fatalf("latency not shown: %q", tt.Texts())
 	}
 }
 

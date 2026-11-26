@@ -30,6 +30,7 @@ type Engine interface {
 	Stats() model.Stats
 	Logs() ([]model.LogEntry, uint64)
 	ClearLogs()
+	Ping(context.Context, []config.Node) []model.PingResult
 }
 
 // Fetcher downloads a subscription.
@@ -83,6 +84,11 @@ type App struct {
 	logRev  uint64
 	logView int
 
+	pings      map[string]model.PingResult
+	pinging    bool
+	pingGen    int
+	pingCancel context.CancelFunc
+
 	nodeList  ui.ListState
 	logList   ui.ListState
 	nodeIndex int
@@ -111,6 +117,7 @@ func New(deps Deps) *App {
 		done:   make(chan struct{}),
 		state:  model.StateStopped,
 		logRev: ^uint64(0),
+		pings:  make(map[string]model.PingResult),
 	}
 	a.directText = config.JoinList(cfg.Routing.DirectDomains)
 	a.directCIDRs = config.JoinList(cfg.Routing.DirectCIDRs)
@@ -152,6 +159,9 @@ func (a *App) Shutdown() {
 	close(a.done)
 	if a.save != nil {
 		a.save.Stop()
+	}
+	if a.pingCancel != nil {
+		a.pingCancel()
 	}
 	a.saveNow()
 	_ = a.deps.Engine.Stop()
@@ -391,6 +401,7 @@ func (a *App) addSubscription(name, rawURL string, nodes []config.Node, warnings
 	a.addName = ""
 	a.addURL = ""
 	a.nodeList = ui.ListState{}
+	a.clearPings()
 	if len(warnings) > 0 {
 		a.notice = fmt.Sprintf("Импортировано %d нод, пропущено %d", len(nodes), len(warnings))
 	} else {
@@ -415,6 +426,7 @@ func (a *App) replaceSubscription(id string, nodes []config.Node, warnings []str
 		a.cfg.SelectedNode = "auto"
 	}
 	a.nodeList = ui.ListState{}
+	a.clearPings()
 	if a.state == model.StateRunning {
 		a.dirty = true
 	}
@@ -537,6 +549,7 @@ func (a *App) deleteSubscription(id string) {
 	}
 	a.confirmDel = ""
 	a.nodeList = ui.ListState{}
+	a.clearPings()
 	a.saveNow()
 	if a.state == model.StateRunning {
 		if len(a.cfg.ActiveNodes()) > 0 {
@@ -555,6 +568,7 @@ func (a *App) selectSubscription(id string) {
 	a.cfg.SelectedNode = "auto"
 	a.nodeList = ui.ListState{}
 	a.nodeIndex = 0
+	a.clearPings()
 	a.saveNow()
 	if a.state == model.StateRunning {
 		a.restartNow()
@@ -624,6 +638,84 @@ func (a *App) syncNodeIndex() {
 func (a *App) routingChanged() {
 	a.dirty = true
 	a.scheduleSave()
+}
+
+func (a *App) clearPings() {
+	a.pings = make(map[string]model.PingResult)
+}
+
+func (a *App) pingNodes() {
+	if a.pinging || a.busy {
+		return
+	}
+	nodes := a.cfg.ActiveNodes()
+	if len(nodes) == 0 {
+		return
+	}
+	work := make([]config.Node, len(nodes))
+	for i, node := range nodes {
+		work[i] = node.Clone()
+	}
+
+	if a.pingCancel != nil {
+		a.pingCancel()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	a.pingCancel = cancel
+	a.pingGen++
+	gen := a.pingGen
+	a.pinging = true
+	a.clearPings()
+	a.notice = ""
+
+	run := func() {
+		defer cancel()
+		results := a.deps.Engine.Ping(ctx, work)
+		a.post(func() {
+			if gen != a.pingGen {
+				return
+			}
+			a.pinging = false
+			a.pingCancel = nil
+			ok := 0
+			for i, result := range results {
+				if result.Tag == "" {
+					result.Tag = work[i].Tag
+				}
+				a.pings[result.Tag] = result
+				if result.Err == "" {
+					ok++
+				}
+			}
+			a.notice = fmt.Sprintf("Пинг: %d из %d ответили", ok, len(results))
+			if a.win != nil {
+				a.win.Invalidate()
+			}
+		})
+	}
+	if a.win == nil {
+		run()
+		return
+	}
+	go run()
+}
+
+// latency returns the label and tone for a node's last ping.
+func (a *App) latency(tag string) (string, string) {
+	result, ok := a.pings[tag]
+	if !ok {
+		if a.pinging {
+			return "…", "pending"
+		}
+		return "", ""
+	}
+	if result.Err != "" {
+		return "ошибка", "error"
+	}
+	if result.Latency < time.Millisecond {
+		return "<1 мс", "ok"
+	}
+	return fmt.Sprintf("%d мс", result.Latency.Milliseconds()), "ok"
 }
 
 func (a *App) updateRuleSet(tag string) {

@@ -154,6 +154,13 @@ func (a *App) serversPage(c *ui.Context) {
 	ui.Scroll(c).Grow(1).Gap(12).Children(func() {
 		ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, "Подписки").FontSize(18).Bold().Grow(1)
+			if !a.adding && len(a.cfg.ActiveNodes()) > 0 {
+				label := "Пинг всех"
+				if a.pinging {
+					label = "Пинг…"
+				}
+				ui.Button(c, label).Disabled(a.pinging || a.busy).OnClick(a.pingNodes)
+			}
 			if !a.adding {
 				ui.Button(c, "Добавить подписку").OnClick(func() {
 					a.adding = true
@@ -192,7 +199,21 @@ func (a *App) serversPage(c *ui.Context) {
 		ui.List(c, &a.nodeList, len(rows), func(i int) {
 			row := rows[i]
 			ui.Column(c).Gap(2).Padding(8, 12).Children(func() {
-				ui.Text(c, row.title)
+				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, row.title).Grow(1)
+					if !row.auto {
+						if text, tone := a.latency(row.tag); text != "" {
+							color := t.TextMuted
+							switch tone {
+							case "ok":
+								color = t.Success
+							case "error":
+								color = t.Danger
+							}
+							ui.Text(c, text).TextColor(color).FontSize(12)
+						}
+					}
+				})
 				ui.Text(c, row.detail).TextColor(t.TextMuted).FontSize(12)
 			})
 		}).Height(280).OnChange(func() {
