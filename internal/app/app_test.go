@@ -220,7 +220,7 @@ func TestNavigation(t *testing.T) {
 	if err := tt.Click("Маршрутизация"); err != nil {
 		t.Fatal(err)
 	}
-	if !tt.HasText("Обход РФ") {
+	if !tt.HasText("Обход РФ") || !tt.HasText("Профили маршрутизации") || !tt.HasText("Основной") {
 		t.Fatalf("texts = %q", tt.Texts())
 	}
 	if err := tt.Click("Настройки"); err != nil {
@@ -243,6 +243,82 @@ func TestNodeSelection(t *testing.T) {
 	}
 	if eng.stopped != 0 {
 		t.Fatal("restart was attempted while stopped")
+	}
+}
+
+func TestRoutingProfiles(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	eng := &fakeEngine{state: model.StateRunning}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	a.state = model.StateRunning
+	firstID := a.cfg.ActiveRoutingProfileID
+	if firstID == "" {
+		t.Fatal("no active routing profile")
+	}
+
+	a.cfg.Routing.Mode = config.ModeGlobal
+	a.createRoutingProfile()
+	secondID := a.cfg.ActiveRoutingProfileID
+	if secondID == firstID || len(a.cfg.RoutingProfiles) != 2 {
+		t.Fatalf("profiles = %+v active=%q", a.cfg.RoutingProfiles, a.cfg.ActiveRoutingProfileID)
+	}
+	if !a.profileRenaming {
+		t.Fatal("new profile is not ready for renaming")
+	}
+	if a.cfg.RoutingProfile(firstID).Routing.Mode != config.ModeGlobal {
+		t.Fatalf("first profile lost the edit: %+v", a.cfg.RoutingProfile(firstID).Routing)
+	}
+
+	a.setMode(2) // Direct for the second profile.
+	a.profileNameDraft = "Работа"
+	a.saveRoutingProfileName()
+	if got := a.cfg.RoutingProfile(secondID); got == nil || got.Name != "Работа" || got.Routing.Mode != config.ModeDirect {
+		t.Fatalf("second profile = %+v", got)
+	}
+
+	a.selectRoutingProfile(firstID)
+	if a.cfg.Routing.Mode != config.ModeGlobal {
+		t.Fatalf("first profile mode = %q", a.cfg.Routing.Mode)
+	}
+	a.selectRoutingProfile(secondID)
+	if a.cfg.Routing.Mode != config.ModeDirect {
+		t.Fatalf("second profile mode = %q", a.cfg.Routing.Mode)
+	}
+	if eng.restarted == 0 {
+		t.Fatal("profile switch did not restart the engine")
+	}
+
+	a.requestDeleteRoutingProfile()
+	if a.profileDeleting == "" {
+		t.Fatal("delete was not requested")
+	}
+	a.confirmDeleteRoutingProfile()
+	if len(a.cfg.RoutingProfiles) != 1 || a.cfg.ActiveRoutingProfileID == secondID {
+		t.Fatalf("profiles after delete = %+v active=%q", a.cfg.RoutingProfiles, a.cfg.ActiveRoutingProfileID)
+	}
+}
+
+func TestRoutingProfileSelectUI(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	eng := &fakeEngine{state: model.StateStopped}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	a.createRoutingProfile()
+	a.profileNameDraft = "Работа"
+	a.saveRoutingProfileName()
+	a.page = 2
+
+	tt := ui.NewTester(a.view, 1000, 720)
+	if !tt.HasText("Работа") {
+		t.Fatalf("profiles not shown: %q", tt.Texts())
+	}
+	if err := tt.Click("Работа"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.Click("Основной"); err != nil {
+		t.Fatal(err)
+	}
+	if a.activeRoutingProfileName() != "Основной" {
+		t.Fatalf("active profile = %q", a.activeRoutingProfileName())
 	}
 }
 

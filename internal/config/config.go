@@ -14,7 +14,13 @@ import (
 )
 
 // Version is the current configuration schema version.
-const Version = 1
+const Version = 2
+
+// MaxRoutingProfiles bounds the number of routing profiles.
+const MaxRoutingProfiles = 32
+
+// maxRoutingProfileName bounds a profile name shown in the UI.
+const maxRoutingProfileName = 64
 
 // maxConfigSize bounds the config file read from disk.
 const maxConfigSize = 32 << 20
@@ -41,9 +47,13 @@ type Config struct {
 	ActiveSubscription string  `json:"active_subscription,omitempty"`
 	SelectedNode       string  `json:"selected_node,omitempty"`
 	Routing            Routing `json:"routing"`
-	TUN                TUN     `json:"tun"`
-	DNS                DNS     `json:"dns"`
-	LogLevel           string  `json:"log_level,omitempty"`
+	// RoutingProfiles stores every routing profile. Routing above is the
+	// active profile and stays authoritative for the engine and old builds.
+	RoutingProfiles        []RoutingProfile `json:"routing_profiles,omitempty"`
+	ActiveRoutingProfileID string           `json:"active_routing_profile,omitempty"`
+	TUN                    TUN              `json:"tun"`
+	DNS                    DNS              `json:"dns"`
+	LogLevel               string           `json:"log_level,omitempty"`
 }
 
 // Subscription is a fetched proxy list.
@@ -76,6 +86,13 @@ type Routing struct {
 	ProxyCIDRs    []string `json:"proxy_cidrs,omitempty"`
 }
 
+// RoutingProfile is a named set of routing rules.
+type RoutingProfile struct {
+	ID      string  `json:"id"`
+	Name    string  `json:"name"`
+	Routing Routing `json:"routing"`
+}
+
 // TUN holds the inbound settings.
 type TUN struct {
 	InterfaceName string `json:"interface_name"`
@@ -97,15 +114,22 @@ type DNS struct {
 
 // Defaults returns a usable configuration for a fresh installation.
 func Defaults() Config {
+	routing := Routing{
+		Mode:      ModeRules,
+		BypassLAN: true,
+		BypassRU:  true,
+		BlockAds:  true,
+	}
 	return Config{
 		Version:      Version,
 		SelectedNode: "auto",
-		Routing: Routing{
-			Mode:      ModeRules,
-			BypassLAN: true,
-			BypassRU:  true,
-			BlockAds:  true,
-		},
+		Routing:      routing,
+		RoutingProfiles: []RoutingProfile{{
+			ID:      "profile-1",
+			Name:    "Основной",
+			Routing: routing.Clone(),
+		}},
+		ActiveRoutingProfileID: "profile-1",
 		TUN: TUN{
 			InterfaceName: "qbox",
 			Stack:         StackMixed,
@@ -124,12 +148,25 @@ func Defaults() Config {
 func (c Config) Clone() Config {
 	out := c
 	out.Routing = c.Routing.Clone()
+	if c.RoutingProfiles != nil {
+		out.RoutingProfiles = make([]RoutingProfile, len(c.RoutingProfiles))
+		for i, profile := range c.RoutingProfiles {
+			out.RoutingProfiles[i] = profile.Clone()
+		}
+	}
 	if c.Subscriptions != nil {
 		out.Subscriptions = make([]Subscription, len(c.Subscriptions))
 		for i, sub := range c.Subscriptions {
 			out.Subscriptions[i] = sub.Clone()
 		}
 	}
+	return out
+}
+
+// Clone returns a deep copy of a routing profile.
+func (p RoutingProfile) Clone() RoutingProfile {
+	out := p
+	out.Routing = p.Routing.Clone()
 	return out
 }
 
@@ -164,18 +201,34 @@ func (r Routing) Clone() Routing {
 	return out
 }
 
+// Equal reports whether two routing configurations have the same effect.
+func (r Routing) Equal(other Routing) bool {
+	return r.Mode == other.Mode &&
+		r.BypassLAN == other.BypassLAN &&
+		r.BypassRU == other.BypassRU &&
+		r.BlockAds == other.BlockAds &&
+		slices.Equal(r.DirectDomains, other.DirectDomains) &&
+		slices.Equal(r.DirectCIDRs, other.DirectCIDRs) &&
+		slices.Equal(r.ProxyDomains, other.ProxyDomains) &&
+		slices.Equal(r.ProxyCIDRs, other.ProxyCIDRs)
+}
+
+func (r Routing) configured() bool {
+	return r.Mode != "" || r.BypassLAN || r.BypassRU || r.BlockAds ||
+		len(r.DirectDomains) > 0 || len(r.DirectCIDRs) > 0 ||
+		len(r.ProxyDomains) > 0 || len(r.ProxyCIDRs) > 0
+}
+
 // Normalize fills zero values with defaults and repairs invalid choices.
 func (c *Config) Normalize() {
-	if c.Version == 0 {
+	if c.Version < Version {
 		c.Version = Version
 	}
 	def := Defaults()
 
-	switch c.Routing.Mode {
-	case ModeGlobal, ModeRules, ModeDirect:
-	default:
-		c.Routing.Mode = def.Routing.Mode
-	}
+	flatRoutingSet := c.Routing.configured()
+	normalizeRouting(&c.Routing, def.Routing)
+	c.normalizeRoutingProfiles(def.Routing, flatRoutingSet)
 
 	c.TUN.InterfaceName = strings.TrimSpace(c.TUN.InterfaceName)
 	if !validInterfaceName(c.TUN.InterfaceName) {
@@ -240,6 +293,235 @@ func (c *Config) Normalize() {
 	}
 	if c.ActiveSubscription == "" && len(c.Subscriptions) > 0 {
 		c.ActiveSubscription = c.Subscriptions[0].ID
+	}
+}
+
+func normalizeRouting(r *Routing, def Routing) {
+	switch r.Mode {
+	case ModeGlobal, ModeRules, ModeDirect:
+	default:
+		r.Mode = def.Mode
+	}
+}
+
+func (c *Config) normalizeRoutingProfiles(def Routing, flatRoutingSet bool) {
+	if len(c.RoutingProfiles) == 0 {
+		c.RoutingProfiles = []RoutingProfile{{
+			ID:      "profile-1",
+			Name:    "Основной",
+			Routing: c.Routing.Clone(),
+		}}
+		c.ActiveRoutingProfileID = c.RoutingProfiles[0].ID
+		return
+	}
+
+	usedIDs := make(map[string]struct{}, len(c.RoutingProfiles))
+	usedNames := make(map[string]struct{}, len(c.RoutingProfiles))
+	activeID := strings.TrimSpace(c.ActiveRoutingProfileID)
+	c.ActiveRoutingProfileID = activeID
+	activeAssigned := false
+	for i := range c.RoutingProfiles {
+		profile := &c.RoutingProfiles[i]
+		oldID := strings.TrimSpace(profile.ID)
+		if oldID == "" {
+			oldID = fmt.Sprintf("profile-%d", i+1)
+		}
+		id := oldID
+		for n := 2; ; n++ {
+			if _, exists := usedIDs[id]; !exists {
+				break
+			}
+			id = fmt.Sprintf("%s-%d", oldID, n)
+		}
+		usedIDs[id] = struct{}{}
+		profile.ID = id
+		if !activeAssigned && activeID != "" && activeID == oldID {
+			c.ActiveRoutingProfileID = id
+			activeAssigned = true
+		}
+
+		profile.Name = sanitizeRoutingProfileName(profile.Name)
+		if profile.Name == "" {
+			profile.Name = fmt.Sprintf("Профиль %d", i+1)
+		}
+		profile.Name = uniqueRoutingProfileName(profile.Name, usedNames)
+		normalizeRouting(&profile.Routing, def)
+	}
+
+	active := c.RoutingProfile(c.ActiveRoutingProfileID)
+	if active == nil {
+		active = &c.RoutingProfiles[0]
+		c.ActiveRoutingProfileID = active.ID
+	}
+	if flatRoutingSet {
+		// The flat routing block is what the UI edits and what older builds
+		// read, so it wins when both copies are present.
+		active.Routing = c.Routing.Clone()
+	} else {
+		c.Routing = active.Routing.Clone()
+	}
+}
+
+func sanitizeRoutingProfileName(name string) string {
+	name = strings.TrimSpace(name)
+	name = strings.Map(func(r rune) rune {
+		switch r {
+		case '\r', '\n', '\t':
+			return ' '
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		if r == '\u200b' || r == '\u200c' || r == '\u200d' || r == '\u200e' || r == '\u200f' ||
+			(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069') || r == '\ufeff' {
+			return -1
+		}
+		return r
+	}, name)
+	return strings.TrimSpace(truncateRunes(name, maxRoutingProfileName))
+}
+
+func uniqueRoutingProfileName(base string, used map[string]struct{}) string {
+	name := base
+	for n := 2; ; n++ {
+		if _, exists := used[name]; !exists {
+			break
+		}
+		suffix := fmt.Sprintf(" (%d)", n)
+		name = truncateRunes(base, maxRoutingProfileName-len([]rune(suffix))) + suffix
+	}
+	used[name] = struct{}{}
+	return name
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
+}
+
+// RoutingProfile returns the profile with the given ID, if any.
+func (c *Config) RoutingProfile(id string) *RoutingProfile {
+	for i := range c.RoutingProfiles {
+		if c.RoutingProfiles[i].ID == id {
+			return &c.RoutingProfiles[i]
+		}
+	}
+	return nil
+}
+
+// ActiveRoutingProfile returns the profile currently applied.
+func (c *Config) ActiveRoutingProfile() *RoutingProfile {
+	return c.RoutingProfile(c.ActiveRoutingProfileID)
+}
+
+// SyncActiveRoutingProfile copies the flat routing settings into the active
+// profile, so an in-memory profile never lags behind the UI edits.
+func (c *Config) SyncActiveRoutingProfile() {
+	if profile := c.ActiveRoutingProfile(); profile != nil {
+		profile.Routing = c.Routing.Clone()
+	}
+}
+
+// SelectRoutingProfile saves the active routing settings into the current
+// profile and switches to another one.
+func (c *Config) SelectRoutingProfile(id string) bool {
+	target := c.RoutingProfile(id)
+	if target == nil {
+		return false
+	}
+	if current := c.ActiveRoutingProfile(); current != nil {
+		current.Routing = c.Routing.Clone()
+	}
+	c.ActiveRoutingProfileID = target.ID
+	c.Routing = target.Routing.Clone()
+	return true
+}
+
+// AddRoutingProfile creates a profile copying the current routing settings.
+func (c *Config) AddRoutingProfile(name string) (string, error) {
+	if len(c.RoutingProfiles) >= MaxRoutingProfiles {
+		return "", fmt.Errorf("не больше %d профилей маршрутизации", MaxRoutingProfiles)
+	}
+	name = sanitizeRoutingProfileName(name)
+	if name == "" {
+		name = "Новый профиль"
+	}
+	usedNames := make(map[string]struct{}, len(c.RoutingProfiles))
+	for i := range c.RoutingProfiles {
+		usedNames[c.RoutingProfiles[i].Name] = struct{}{}
+	}
+	profile := RoutingProfile{
+		ID:      c.nextRoutingProfileID(),
+		Name:    uniqueRoutingProfileName(name, usedNames),
+		Routing: c.Routing.Clone(),
+	}
+	c.RoutingProfiles = append(c.RoutingProfiles, profile)
+	return profile.ID, nil
+}
+
+// RenameRoutingProfile changes a profile name and returns the final unique
+// name. The boolean is false for an unknown profile or an empty name.
+func (c *Config) RenameRoutingProfile(id, name string) (string, bool) {
+	profile := c.RoutingProfile(id)
+	if profile == nil {
+		return "", false
+	}
+	name = sanitizeRoutingProfileName(name)
+	if name == "" {
+		return "", false
+	}
+	usedNames := make(map[string]struct{}, len(c.RoutingProfiles))
+	for i := range c.RoutingProfiles {
+		if c.RoutingProfiles[i].ID != id {
+			usedNames[c.RoutingProfiles[i].Name] = struct{}{}
+		}
+	}
+	profile.Name = uniqueRoutingProfileName(name, usedNames)
+	return profile.Name, true
+}
+
+// DeleteRoutingProfile removes a profile. The last profile cannot be
+// deleted. Deleting the active profile selects its neighbour.
+func (c *Config) DeleteRoutingProfile(id string) bool {
+	if len(c.RoutingProfiles) <= 1 {
+		return false
+	}
+	index := -1
+	for i := range c.RoutingProfiles {
+		if c.RoutingProfiles[i].ID == id {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return false
+	}
+	wasActive := c.ActiveRoutingProfileID == id
+	c.RoutingProfiles = append(c.RoutingProfiles[:index], c.RoutingProfiles[index+1:]...)
+	if !wasActive {
+		return true
+	}
+	next := index
+	if next >= len(c.RoutingProfiles) {
+		next = 0
+	}
+	c.ActiveRoutingProfileID = c.RoutingProfiles[next].ID
+	c.Routing = c.RoutingProfiles[next].Routing.Clone()
+	return true
+}
+
+func (c *Config) nextRoutingProfileID() string {
+	for n := 1; ; n++ {
+		id := fmt.Sprintf("profile-%d", n)
+		if c.RoutingProfile(id) == nil {
+			return id
+		}
 	}
 }
 

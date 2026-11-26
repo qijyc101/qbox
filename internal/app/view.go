@@ -92,6 +92,11 @@ func (a *App) statusDetail() string {
 	if sub := a.activeSub(); sub != nil {
 		parts = append(parts, "подписка: "+sub.Name)
 	}
+	if len(a.cfg.RoutingProfiles) > 1 {
+		if profile := a.cfg.ActiveRoutingProfile(); profile != nil {
+			parts = append(parts, "профиль: "+profile.Name)
+		}
+	}
 	if a.cfg.Routing.Mode != config.ModeDirect && a.cfg.SelectedNode != "" && a.cfg.SelectedNode != "auto" {
 		parts = append(parts, "нода: "+a.cfg.SelectedNode)
 	}
@@ -292,6 +297,7 @@ func (a *App) subscriptionCard(c *ui.Context, sub config.Subscription) {
 func (a *App) routingPage(c *ui.Context) {
 	t := c.Theme()
 	ui.Scroll(c).Grow(1).Gap(14).Children(func() {
+		a.routingProfilesSection(c)
 		ui.Text(c, "Режим").FontSize(18).Bold()
 		mode := a.modeIndex()
 		ui.Segmented(c, &mode, "Global", "Rules", "Direct").FillEqually().OnChange(func() {
@@ -334,6 +340,44 @@ func (a *App) routingPage(c *ui.Context) {
 			a.routingChanged()
 		})
 	})
+}
+
+func (a *App) routingProfilesSection(c *ui.Context) {
+	t := c.Theme()
+	names := a.routingProfileNames()
+	selected := a.activeRoutingProfileName()
+
+	ui.Text(c, "Профили маршрутизации").FontSize(18).Bold()
+	ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+		ui.Select(c, &selected, names).Label("Профиль").Width(240).OnChange(func() {
+			a.selectRoutingProfileByName(selected)
+		})
+		ui.Button(c, "Новый профиль").Disabled(len(names) >= config.MaxRoutingProfiles).OnClick(a.createRoutingProfile)
+		ui.Button(c, "Переименовать").OnClick(a.beginRenameRoutingProfile)
+		if len(names) > 1 {
+			ui.Button(c, "Удалить").Disabled(a.profileDeleting != "").OnClick(a.requestDeleteRoutingProfile)
+		}
+	})
+	ui.Text(c, "Профиль хранит режим, обход LAN/РФ, adblock и свои списки. Переключение на профиль с другими правилами перезапускает подключение.").TextColor(t.TextMuted).FontSize(12)
+
+	if a.profileRenaming {
+		ui.Row(c).Gap(10).AlignItems(ui.End).Children(func() {
+			ui.TextInput(c, &a.profileNameDraft).Label("Название профиля").Grow(1)
+			ui.Button(c, "Сохранить").OnClick(a.saveRoutingProfileName)
+			ui.Button(c, "Отмена").OnClick(a.cancelRenameRoutingProfile)
+		})
+	}
+	if a.profileDeleting != "" {
+		name := a.profileDeleting
+		if profile := a.cfg.RoutingProfile(a.profileDeleting); profile != nil {
+			name = profile.Name
+		}
+		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, "Удалить профиль «"+name+"»?").TextColor(t.Warning).Grow(1)
+			ui.Button(c, "Удалить профиль").OnClick(a.confirmDeleteRoutingProfile)
+			ui.Button(c, "Отмена").OnClick(a.cancelDeleteRoutingProfile)
+		})
+	}
 }
 
 func (a *App) switchRow(c *ui.Context, title string, value *bool, hint string) {

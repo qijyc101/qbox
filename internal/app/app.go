@@ -123,6 +123,10 @@ type App struct {
 	directCIDRs string
 	proxyText   string
 	proxyCIDRs  string
+
+	profileRenaming  bool
+	profileNameDraft string
+	profileDeleting  string
 }
 
 // New creates the app state.
@@ -146,6 +150,10 @@ func New(deps Deps) *App {
 	a.directCIDRs = config.JoinList(cfg.Routing.DirectCIDRs)
 	a.proxyText = config.JoinList(cfg.Routing.ProxyDomains)
 	a.proxyCIDRs = config.JoinList(cfg.Routing.ProxyCIDRs)
+	a.profileNameDraft = ""
+	if profile := cfg.ActiveRoutingProfile(); profile != nil {
+		a.profileNameDraft = profile.Name
+	}
 	if deps.ConfigWarning != "" {
 		a.notice = deps.ConfigWarning
 	}
@@ -770,6 +778,7 @@ func (a *App) syncNodeIndex() {
 }
 
 func (a *App) routingChanged() {
+	a.cfg.SyncActiveRoutingProfile()
 	a.markConfigChanged()
 	a.scheduleSave()
 }
@@ -778,6 +787,200 @@ func (a *App) markConfigChanged() {
 	a.cfgRev++
 	if a.state == model.StateRunning {
 		a.dirty = true
+	}
+}
+
+func (a *App) reloadRoutingFields() {
+	a.directText = config.JoinList(a.cfg.Routing.DirectDomains)
+	a.directCIDRs = config.JoinList(a.cfg.Routing.DirectCIDRs)
+	a.proxyText = config.JoinList(a.cfg.Routing.ProxyDomains)
+	a.proxyCIDRs = config.JoinList(a.cfg.Routing.ProxyCIDRs)
+}
+
+func (a *App) routingProfileNames() []string {
+	names := make([]string, 0, len(a.cfg.RoutingProfiles))
+	for _, profile := range a.cfg.RoutingProfiles {
+		names = append(names, profile.Name)
+	}
+	return names
+}
+
+func (a *App) activeRoutingProfileName() string {
+	if profile := a.cfg.ActiveRoutingProfile(); profile != nil {
+		return profile.Name
+	}
+	return ""
+}
+
+func (a *App) selectRoutingProfileByName(name string) {
+	for _, profile := range a.cfg.RoutingProfiles {
+		if profile.Name == name {
+			a.selectRoutingProfile(profile.ID)
+			return
+		}
+	}
+}
+
+func (a *App) selectRoutingProfile(id string) {
+	if id == "" || id == a.cfg.ActiveRoutingProfileID {
+		return
+	}
+	previous := a.cfg.Routing.Clone()
+	if !a.cfg.SelectRoutingProfile(id) {
+		return
+	}
+	a.reloadRoutingFields()
+	a.profileRenaming = false
+	a.profileDeleting = ""
+	profile := a.cfg.ActiveRoutingProfile()
+	name := id
+	if profile != nil {
+		name = profile.Name
+		a.profileNameDraft = profile.Name
+	}
+	changed := !previous.Equal(a.cfg.Routing)
+	verb := "выбран"
+	if changed {
+		a.markConfigChanged()
+		verb = "применён"
+	}
+	a.notice = "Профиль «" + name + "» " + verb
+	a.saveNow()
+	if changed && a.state == model.StateRunning {
+		a.restartNow()
+	}
+	if a.win != nil {
+		a.win.Invalidate()
+	}
+}
+
+func (a *App) createRoutingProfile() {
+	name := fmt.Sprintf("Профиль %d", len(a.cfg.RoutingProfiles)+1)
+	id, err := a.cfg.AddRoutingProfile(name)
+	if err != nil {
+		a.err = err.Error()
+		if a.win != nil {
+			a.win.Invalidate()
+		}
+		return
+	}
+	a.cfg.SelectRoutingProfile(id)
+	a.reloadRoutingFields()
+	a.profileRenaming = true
+	a.profileDeleting = ""
+	if profile := a.cfg.ActiveRoutingProfile(); profile != nil {
+		a.profileNameDraft = profile.Name
+	}
+	a.err = ""
+	a.notice = "Создан профиль маршрутизации. Задайте имя и правила."
+	a.saveNow()
+	if a.win != nil {
+		a.win.Invalidate()
+	}
+}
+
+func (a *App) beginRenameRoutingProfile() {
+	profile := a.cfg.ActiveRoutingProfile()
+	if profile == nil {
+		return
+	}
+	a.profileRenaming = true
+	a.profileNameDraft = profile.Name
+	a.profileDeleting = ""
+	a.err = ""
+	if a.win != nil {
+		a.win.Invalidate()
+	}
+}
+
+func (a *App) cancelRenameRoutingProfile() {
+	a.profileRenaming = false
+	a.profileNameDraft = a.activeRoutingProfileName()
+	a.err = ""
+	if a.win != nil {
+		a.win.Invalidate()
+	}
+}
+
+func (a *App) saveRoutingProfileName() {
+	name, ok := a.cfg.RenameRoutingProfile(a.cfg.ActiveRoutingProfileID, a.profileNameDraft)
+	if !ok {
+		a.err = "Название профиля не может быть пустым"
+		if a.win != nil {
+			a.win.Invalidate()
+		}
+		return
+	}
+	a.profileRenaming = false
+	a.profileNameDraft = name
+	a.err = ""
+	a.notice = "Профиль переименован: «" + name + "»"
+	a.saveNow()
+	if a.win != nil {
+		a.win.Invalidate()
+	}
+}
+
+func (a *App) requestDeleteRoutingProfile() {
+	if len(a.cfg.RoutingProfiles) <= 1 {
+		a.notice = "Нельзя удалить единственный профиль маршрутизации."
+		if a.win != nil {
+			a.win.Invalidate()
+		}
+		return
+	}
+	profile := a.cfg.ActiveRoutingProfile()
+	if profile == nil {
+		return
+	}
+	a.profileDeleting = profile.ID
+	a.profileRenaming = false
+	if a.win != nil {
+		a.win.Invalidate()
+	}
+}
+
+func (a *App) cancelDeleteRoutingProfile() {
+	a.profileDeleting = ""
+	if a.win != nil {
+		a.win.Invalidate()
+	}
+}
+
+func (a *App) confirmDeleteRoutingProfile() {
+	id := a.profileDeleting
+	if id == "" {
+		return
+	}
+	a.profileDeleting = ""
+	previous := a.cfg.Routing.Clone()
+	wasActive := id == a.cfg.ActiveRoutingProfileID
+	if !a.cfg.DeleteRoutingProfile(id) {
+		return
+	}
+	if !wasActive {
+		a.notice = "Профиль маршрутизации удалён."
+		a.saveNow()
+		if a.win != nil {
+			a.win.Invalidate()
+		}
+		return
+	}
+	a.reloadRoutingFields()
+	if profile := a.cfg.ActiveRoutingProfile(); profile != nil {
+		a.profileNameDraft = profile.Name
+	}
+	changed := !previous.Equal(a.cfg.Routing)
+	if changed {
+		a.markConfigChanged()
+	}
+	a.notice = "Профиль удалён; выбран «" + a.activeRoutingProfileName() + "»"
+	a.saveNow()
+	if changed && a.state == model.StateRunning {
+		a.restartNow()
+	}
+	if a.win != nil {
+		a.win.Invalidate()
 	}
 }
 
