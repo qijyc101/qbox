@@ -94,6 +94,13 @@ func (e *Engine) Start(cfg config.Config, ruleSetPaths map[string]string) error 
 
 	e.setState(model.StateStarting, nil)
 
+	if e.opts.CacheFile != "" {
+		if err := os.MkdirAll(filepath.Dir(e.opts.CacheFile), 0o700); err != nil {
+			e.setState(model.StateError, err)
+			return fmt.Errorf("каталог кэша: %w", err)
+		}
+	}
+
 	exe, _ := os.Executable()
 	data, warnings, err := boxconf.Build(boxconf.Input{
 		Config:       cfg,

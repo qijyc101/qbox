@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -64,7 +65,7 @@ type App struct {
 	win  *mygo.Window
 
 	done   chan struct{}
-	closed bool
+	closed atomic.Bool
 	save   *time.Timer
 
 	page   int
@@ -143,10 +144,9 @@ func (a *App) Open() {
 
 // Shutdown stops the engine and saves the configuration.
 func (a *App) Shutdown() {
-	if a.closed {
+	if a.closed.Swap(true) {
 		return
 	}
-	a.closed = true
 	close(a.done)
 	if a.save != nil {
 		a.save.Stop()
@@ -169,7 +169,7 @@ func (a *App) startPolling() {
 				logs, rev := a.deps.Engine.Logs()
 				lastErr := a.deps.Engine.LastError()
 				mygo.RunOnMain(func() {
-					if a.closed {
+					if a.closed.Load() {
 						return
 					}
 					changed := state != a.state || stats != a.stats || rev != a.logRev
@@ -193,7 +193,7 @@ func (a *App) startPolling() {
 }
 
 func (a *App) post(fn func()) {
-	if a.closed {
+	if a.closed.Load() {
 		return
 	}
 	if a.win == nil {
@@ -219,7 +219,7 @@ func (a *App) scheduleSave() {
 	}
 	a.save = time.AfterFunc(400*time.Millisecond, func() {
 		mygo.RunOnMain(func() {
-			if !a.closed {
+			if !a.closed.Load() {
 				a.saveNow()
 			}
 		})

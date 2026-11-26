@@ -12,6 +12,9 @@ import (
 )
 
 func parseURI(line string) (map[string]any, error) {
+	if i := strings.Index(line, "://"); i > 0 {
+		line = strings.ToLower(line[:i]) + line[i:]
+	}
 	lower := strings.ToLower(line)
 	switch {
 	case strings.HasPrefix(lower, "vless://"):
@@ -300,7 +303,7 @@ func parseShadowsocks(line string) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ss: %w", err)
 	}
-	if tag, err := url.QueryUnescape(fragment); err == nil {
+	if tag, err := url.PathUnescape(fragment); err == nil {
 		fragment = tag
 	}
 	return map[string]any{
@@ -341,6 +344,9 @@ func parseHysteria2(line string) (map[string]any, error) {
 		out["password"] = auth
 	}
 	if obfs := strings.ToLower(q.Get("obfs")); obfs != "" {
+		if obfs != "salamander" && obfs != "gecko" {
+			return nil, fmt.Errorf("hysteria2: obfs %q не поддерживается", obfs)
+		}
 		obfsOptions := map[string]any{"type": obfs}
 		if pass := firstQuery(q, "obfs-password", "obfs_password", "obfsPassword"); pass != "" {
 			obfsOptions["password"] = pass
@@ -563,7 +569,7 @@ func tagFromURL(u *url.URL) string {
 	if u.Fragment == "" {
 		return ""
 	}
-	tag, err := url.QueryUnescape(u.Fragment)
+	tag, err := url.PathUnescape(u.Fragment)
 	if err != nil {
 		tag = u.Fragment
 	}
