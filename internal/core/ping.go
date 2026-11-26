@@ -23,7 +23,7 @@ const (
 	pingConcurrency = 4
 )
 
-var pingTarget = M.ParseSocksaddrHostPort("www.gstatic.com", 80)
+var pingTarget = M.ParseSocksaddrHostPort("www.gstatic.com", 443)
 
 // Ping measures the latency of every node through its proxy protocol. Each
 // node gets a short-lived sing-box instance without TUN or inbounds, so a
