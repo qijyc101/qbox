@@ -27,6 +27,8 @@ type Input struct {
 	RuleSetPaths map[string]string // tag -> absolute .srs path
 	ExeName      string
 	CacheFile    string
+	// ProxyPort is the local mixed inbound port when TUN is disabled.
+	ProxyPort int
 	// DisableIPv6 forces an IPv4-only TUN interface. Used for the
 	// automatic retry when Windows refuses the IPv6 address.
 	DisableIPv6 bool
@@ -92,6 +94,8 @@ type realityOptions struct {
 type inbound struct {
 	Type          string   `json:"type"`
 	Tag           string   `json:"tag"`
+	Listen        string   `json:"listen,omitempty"`
+	ListenPort    int      `json:"listen_port,omitempty"`
 	InterfaceName string   `json:"interface_name,omitempty"`
 	Address       []string `json:"address,omitempty"`
 	MTU           int      `json:"mtu,omitempty"`
@@ -250,22 +254,47 @@ func Build(in Input) ([]byte, []string, error) {
 		dnsFinal = "remote"
 	}
 
-	addresses := []string{"172.19.0.1/30"}
-	disableIPv6 := cfg.TUN.DisableIPv6 || in.DisableIPv6
-	if !disableIPv6 {
-		addresses = append(addresses, "fdfe:dcba:9876::1/126")
-	}
-	strictRoute := cfg.TUN.StrictRoute
+	disableIPv6 := cfg.TUN.Enabled && (cfg.TUN.DisableIPv6 || in.DisableIPv6)
 	dnsStrategy := "prefer_ipv4"
 	if disableIPv6 {
-		// Without an IPv6 address sing-tun installs no IPv6 route. On
-		// Windows strict_route also blocks IPv6 leaks through the physical
-		// interface, so force it for IPv4-only TUNs.
-		if !strictRoute {
-			warnings = append(warnings, "IPv6 отключён: strict_route включён для блокировки IPv6-утечек")
-		}
-		strictRoute = true
 		dnsStrategy = "ipv4_only"
+	}
+
+	var inbounds []inbound
+	if cfg.TUN.Enabled {
+		addresses := []string{"172.19.0.1/30"}
+		if !disableIPv6 {
+			addresses = append(addresses, "fdfe:dcba:9876::1/126")
+		}
+		strictRoute := cfg.TUN.StrictRoute
+		if disableIPv6 && !strictRoute {
+			// Without an IPv6 address sing-tun installs no IPv6 route. On
+			// Windows strict_route also blocks IPv6 leaks through the physical
+			// interface, so force it for IPv4-only TUNs.
+			warnings = append(warnings, "IPv6 отключён: strict_route включён для блокировки IPv6-утечек")
+			strictRoute = true
+		}
+		inbounds = []inbound{{
+			Type:          "tun",
+			Tag:           "tun-in",
+			InterfaceName: cfg.TUN.InterfaceName,
+			Address:       addresses,
+			MTU:           cfg.TUN.MTU,
+			DNSMode:       "hijack",
+			AutoRoute:     true,
+			StrictRoute:   strictRoute,
+			Stack:         cfg.TUN.Stack,
+		}}
+	} else {
+		if in.ProxyPort < 1 || in.ProxyPort > 65535 {
+			return nil, warnings, fmt.Errorf("некорректный порт локального прокси: %d", in.ProxyPort)
+		}
+		inbounds = []inbound{{
+			Type:       "mixed",
+			Tag:        "mixed-in",
+			Listen:     "127.0.0.1",
+			ListenPort: in.ProxyPort,
+		}}
 	}
 
 	doc := document{
@@ -279,17 +308,7 @@ func Build(in Input) ([]byte, []string, error) {
 			Final:    dnsFinal,
 			Strategy: dnsStrategy,
 		},
-		Inbounds: []inbound{{
-			Type:          "tun",
-			Tag:           "tun-in",
-			InterfaceName: cfg.TUN.InterfaceName,
-			Address:       addresses,
-			MTU:           cfg.TUN.MTU,
-			DNSMode:       "hijack",
-			AutoRoute:     true,
-			StrictRoute:   strictRoute,
-			Stack:         cfg.TUN.Stack,
-		}},
+		Inbounds:  inbounds,
 		Outbounds: outbounds,
 		Route: routeOptions{
 			Rules:                 rules,

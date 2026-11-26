@@ -23,6 +23,22 @@ type Stats struct {
 	Connections int
 }
 
+// Connection is one active proxied connection, as shown by the UI.
+type Connection struct {
+	ID           string
+	Host         string
+	Destination  string
+	Network      string
+	Protocol     string
+	Outbound     string
+	OutboundType string
+	Rule         string
+	Chain        []string
+	CreatedAt    time.Time
+	Upload       int64
+	Download     int64
+}
+
 // PingResult is the latency of one node, measured through its proxy
 // protocol.
 type PingResult struct {

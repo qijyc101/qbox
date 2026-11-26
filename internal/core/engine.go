@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -40,13 +42,15 @@ type Engine struct {
 	opMu   sync.Mutex // serializes Start, Stop, Restart and Close
 	closed bool
 
-	mu       sync.Mutex
-	state    model.State
-	lastErr  string
-	lastWarn string
-	instance *box.Box
-	cancel   context.CancelFunc
-	traffic  *trafficcontrol.Manager
+	mu         sync.Mutex
+	state      model.State
+	lastErr    string
+	lastWarn   string
+	instance   *box.Box
+	cancel     context.CancelFunc
+	traffic    *trafficcontrol.Manager
+	proxyAddr  string
+	lastConfig []byte
 
 	tempMu     sync.Mutex
 	tempBoxes  map[*box.Box]struct{}
@@ -142,12 +146,24 @@ func (e *Engine) startLocked(cfg config.Config, ruleSetPaths map[string]string) 
 		}
 	}
 
+	proxyPort := 0
+	proxyAddr := ""
+	if !cfg.TUN.Enabled {
+		var err error
+		proxyPort, proxyAddr, err = freeProxyPort(cfg.Proxy.Port)
+		if err != nil {
+			e.setState(model.StateError, err)
+			return err
+		}
+	}
+
 	exe, _ := os.Executable()
 	buildInput := boxconf.Input{
 		Config:       cfg,
 		RuleSetPaths: ruleSetPaths,
 		ExeName:      filepath.Base(exe),
 		CacheFile:    e.opts.CacheFile,
+		ProxyPort:    proxyPort,
 	}
 	data, warnings, err := boxconf.Build(buildInput)
 	e.logWarnings(warnings)
@@ -158,7 +174,7 @@ func (e *Engine) startLocked(cfg config.Config, ruleSetPaths map[string]string) 
 	collectedWarnings := append([]string(nil), warnings...)
 
 	instance, cancel, traffic, err := e.launch(data)
-	if err != nil && !cfg.TUN.DisableIPv6 && isIPv6ConfigError(err) {
+	if err != nil && cfg.TUN.Enabled && !cfg.TUN.DisableIPv6 && isIPv6ConfigError(err) {
 		message := "Windows не смогла назначить IPv6-адрес TUN; повтор запуска без IPv6"
 		e.logs.WriteMessage(log.LevelWarn, message)
 		buildInput.DisableIPv6 = true
@@ -189,6 +205,8 @@ func (e *Engine) startLocked(cfg config.Config, ruleSetPaths map[string]string) 
 	e.instance = instance
 	e.cancel = cancel
 	e.traffic = traffic
+	e.proxyAddr = proxyAddr
+	e.lastConfig = append([]byte(nil), data...)
 	e.state = model.StateRunning
 	e.lastErr = ""
 	e.mu.Unlock()
@@ -286,6 +304,7 @@ func (e *Engine) stopLocked() error {
 		e.instance = instance
 		e.cancel = nil
 		e.traffic = nil
+		e.proxyAddr = ""
 		e.state = model.StateError
 		e.lastErr = fmt.Sprintf("остановка sing-box: %v", err)
 		e.mu.Unlock()
@@ -296,6 +315,7 @@ func (e *Engine) stopLocked() error {
 	e.instance = nil
 	e.cancel = nil
 	e.traffic = nil
+	e.proxyAddr = ""
 	e.state = model.StateStopped
 	e.mu.Unlock()
 
@@ -318,6 +338,90 @@ func (e *Engine) Stats() model.Stats {
 		Down:        down,
 		Connections: traffic.ConnectionsLen(),
 	}
+}
+
+// ProxyAddress returns the local mixed inbound address while it runs.
+func (e *Engine) ProxyAddress() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.proxyAddr
+}
+
+// LastConfig returns the sing-box configuration applied last.
+func (e *Engine) LastConfig() []byte {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]byte(nil), e.lastConfig...)
+}
+
+// Connections returns the active connections, newest first.
+func (e *Engine) Connections() []model.Connection {
+	e.mu.Lock()
+	traffic := e.traffic
+	running := e.instance != nil
+	e.mu.Unlock()
+	if !running || traffic == nil {
+		return nil
+	}
+	metas := traffic.Connections()
+	out := make([]model.Connection, 0, len(metas))
+	for _, meta := range metas {
+		if meta == nil {
+			continue
+		}
+		host := meta.Metadata.Domain
+		if host == "" {
+			host = meta.Metadata.Destination.AddrString()
+		}
+		up, down := int64(0), int64(0)
+		if meta.Upload != nil {
+			up = meta.Upload.Load()
+		}
+		if meta.Download != nil {
+			down = meta.Download.Load()
+		}
+		out = append(out, model.Connection{
+			ID:           meta.ID.String(),
+			Host:         host,
+			Destination:  meta.Metadata.Destination.String(),
+			Network:      meta.Metadata.Network,
+			Protocol:     meta.Metadata.Protocol,
+			Outbound:     meta.Outbound,
+			OutboundType: meta.OutboundType,
+			Rule:         meta.Metadata.RouteRule,
+			Chain:        append([]string(nil), meta.Chain...),
+			CreatedAt:    meta.CreatedAt,
+			Upload:       up,
+			Download:     down,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	const maxConnections = 200
+	if len(out) > maxConnections {
+		out = out[:maxConnections]
+	}
+	return out
+}
+
+// freeProxyPort returns a free local port and its address. A wanted port is
+// used as is; zero asks the OS for any free port.
+func freeProxyPort(want int) (int, string, error) {
+	listen := "127.0.0.1:0"
+	if want != 0 {
+		listen = fmt.Sprintf("127.0.0.1:%d", want)
+	}
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		if want != 0 {
+			return 0, "", fmt.Errorf("порт %d занят: %w", want, err)
+		}
+		return 0, "", fmt.Errorf("не удалось выбрать порт прокси: %w", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port, fmt.Sprintf("127.0.0.1:%d", port), nil
 }
 
 // Logs returns buffered log entries and their revision.

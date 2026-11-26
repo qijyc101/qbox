@@ -14,10 +14,37 @@ import (
 )
 
 // Version is the current configuration schema version.
-const Version = 2
+const Version = 3
 
 // MaxRoutingProfiles bounds the number of routing profiles.
 const MaxRoutingProfiles = 32
+
+// Appearance themes.
+const (
+	ThemeSystem = "system"
+	ThemeLight  = "light"
+	ThemeDark   = "dark"
+)
+
+// Accent colors.
+const (
+	AccentBlue    = "blue"
+	AccentViolet  = "violet"
+	AccentEmerald = "emerald"
+	AccentAmber   = "amber"
+	AccentRose    = "rose"
+	AccentTeal    = "teal"
+)
+
+// Corner radius presets.
+const (
+	CornersCompact = "compact"
+	CornersSoft    = "soft"
+	CornersRound   = "round"
+)
+
+// DefaultProxyPort is zero so the OS picks a free port on each start.
+const DefaultProxyPort = 0
 
 // maxRoutingProfileName bounds a profile name shown in the UI.
 const maxRoutingProfileName = 64
@@ -52,6 +79,8 @@ type Config struct {
 	RoutingProfiles        []RoutingProfile `json:"routing_profiles,omitempty"`
 	ActiveRoutingProfileID string           `json:"active_routing_profile,omitempty"`
 	TUN                    TUN              `json:"tun"`
+	Proxy                  Proxy            `json:"proxy"`
+	Appearance             Appearance       `json:"appearance"`
 	DNS                    DNS              `json:"dns"`
 	LogLevel               string           `json:"log_level,omitempty"`
 }
@@ -95,6 +124,8 @@ type RoutingProfile struct {
 
 // TUN holds the inbound settings.
 type TUN struct {
+	// Enabled switches between the TUN adapter and the system proxy mode.
+	Enabled       bool   `json:"enabled"`
 	InterfaceName string `json:"interface_name"`
 	Stack         string `json:"stack"`
 	MTU           int    `json:"mtu,omitempty"`
@@ -102,6 +133,19 @@ type TUN struct {
 	// DisableIPv6 keeps the IPv6 address off the TUN interface. Some
 	// Windows installations with IPv6 disabled cannot assign one.
 	DisableIPv6 bool `json:"disable_ipv6,omitempty"`
+}
+
+// Proxy holds the local mixed inbound used when TUN is off.
+type Proxy struct {
+	// Port is the local HTTP/SOCKS port. Zero picks a free port.
+	Port int `json:"port,omitempty"`
+}
+
+// Appearance holds the visual preferences.
+type Appearance struct {
+	Theme   string `json:"theme,omitempty"`
+	Accent  string `json:"accent,omitempty"`
+	Corners string `json:"corners,omitempty"`
 }
 
 // DNS holds the resolver settings.
@@ -131,10 +175,19 @@ func Defaults() Config {
 		}},
 		ActiveRoutingProfileID: "profile-1",
 		TUN: TUN{
+			Enabled:       true,
 			InterfaceName: "qbox",
 			Stack:         StackMixed,
 			MTU:           9000,
 			StrictRoute:   true,
+		},
+		Proxy: Proxy{
+			Port: DefaultProxyPort,
+		},
+		Appearance: Appearance{
+			Theme:   ThemeSystem,
+			Accent:  AccentBlue,
+			Corners: CornersSoft,
 		},
 		DNS: DNS{
 			Remote:   "https://1.1.1.1/dns-query",
@@ -221,6 +274,10 @@ func (r Routing) configured() bool {
 
 // Normalize fills zero values with defaults and repairs invalid choices.
 func (c *Config) Normalize() {
+	if c.Version < 3 {
+		// Older configs always used TUN.
+		c.TUN.Enabled = true
+	}
 	if c.Version < Version {
 		c.Version = Version
 	}
@@ -245,6 +302,24 @@ func (c *Config) Normalize() {
 	}
 	if c.TUN.MTU < minMTU || c.TUN.MTU > 65535 {
 		c.TUN.MTU = def.TUN.MTU
+	}
+	if c.Proxy.Port != 0 && (c.Proxy.Port < 1024 || c.Proxy.Port > 65535) {
+		c.Proxy.Port = DefaultProxyPort
+	}
+	switch c.Appearance.Theme {
+	case ThemeSystem, ThemeLight, ThemeDark:
+	default:
+		c.Appearance.Theme = def.Appearance.Theme
+	}
+	switch c.Appearance.Accent {
+	case AccentBlue, AccentViolet, AccentEmerald, AccentAmber, AccentRose, AccentTeal:
+	default:
+		c.Appearance.Accent = def.Appearance.Accent
+	}
+	switch c.Appearance.Corners {
+	case CornersCompact, CornersSoft, CornersRound:
+	default:
+		c.Appearance.Corners = def.Appearance.Corners
 	}
 	if c.DNS.Remote == "" {
 		c.DNS.Remote = def.DNS.Remote

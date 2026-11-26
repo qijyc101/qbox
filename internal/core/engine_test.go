@@ -1,12 +1,18 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"testing"
+	"time"
 
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
@@ -91,5 +97,85 @@ func TestIsIPv6ConfigError(t *testing.T) {
 	}
 	if isIPv6ConfigError(errors.New("permission denied")) {
 		t.Fatal("unrelated error was recognized as IPv6")
+	}
+}
+
+func TestEngineSystemProxyMode(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.TUN.Enabled = false
+	cfg.Routing.Mode = config.ModeDirect
+	cfg.Proxy.Port = 0
+	cfg.LogLevel = "warn"
+
+	engine := New(Options{
+		CacheFile: filepath.Join(t.TempDir(), "cache.db"),
+		LogFile:   filepath.Join(t.TempDir(), "qbox.log"),
+	})
+	defer engine.Close()
+	if err := engine.Start(cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+	addr := engine.ProxyAddress()
+	if addr == "" {
+		t.Fatal("no proxy address")
+	}
+	if !bytes.Contains(engine.LastConfig(), []byte(`"type": "mixed"`)) {
+		t.Fatalf("last config does not contain the mixed inbound: %s", engine.LastConfig())
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("through-qbox"))
+	}))
+	defer server.Close()
+
+	proxyURL, err := url.Parse("http://" + addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+		Timeout:   5 * time.Second,
+	}
+	resp, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "through-qbox" {
+		t.Fatalf("body = %q", body)
+	}
+	if engine.Connections() == nil {
+		// Connections may be empty after the request completes; the call
+		// itself must not panic.
+		t.Log("no connections after the request")
+	}
+	if err := engine.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if engine.ProxyAddress() != "" {
+		t.Fatal("proxy address survived stop")
+	}
+}
+
+func TestFreeProxyPortRejectsBusyPort(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	if _, _, err := freeProxyPort(port); err == nil {
+		t.Fatal("a busy port was accepted")
+	}
+	got, addr, err := freeProxyPort(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == 0 || addr == "" {
+		t.Fatalf("free port = %d %q", got, addr)
 	}
 }

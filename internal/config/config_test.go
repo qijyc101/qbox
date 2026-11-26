@@ -374,3 +374,45 @@ func TestCleanList(t *testing.T) {
 		t.Fatalf("CleanList = %#v", got)
 	}
 }
+
+func TestAppearanceAndProxyMigration(t *testing.T) {
+	var v2 Config
+	if err := json.Unmarshal([]byte(`{"version":2,"tun":{"interface_name":"qbox","stack":"mixed"}}`), &v2); err != nil {
+		t.Fatal(err)
+	}
+	v2.Normalize()
+	if v2.Version != Version {
+		t.Fatalf("version = %d", v2.Version)
+	}
+	if !v2.TUN.Enabled {
+		t.Fatal("v2 config did not enable TUN")
+	}
+	if v2.Appearance != Defaults().Appearance {
+		t.Fatalf("appearance = %+v", v2.Appearance)
+	}
+	if v2.Proxy.Port != DefaultProxyPort {
+		t.Fatalf("proxy port = %d", v2.Proxy.Port)
+	}
+
+	var v3 Config
+	if err := json.Unmarshal([]byte(`{"version":3,"tun":{"enabled":false},"proxy":{"port":3128},"appearance":{"theme":"dark","accent":"violet","corners":"round"}}`), &v3); err != nil {
+		t.Fatal(err)
+	}
+	v3.Normalize()
+	if v3.TUN.Enabled {
+		t.Fatal("an explicit tun.enabled=false was overwritten")
+	}
+	if v3.Proxy.Port != 3128 || v3.Appearance.Theme != ThemeDark ||
+		v3.Appearance.Accent != AccentViolet || v3.Appearance.Corners != CornersRound {
+		t.Fatalf("v3 settings = %+v %+v", v3.Proxy, v3.Appearance)
+	}
+
+	var bad Config
+	if err := json.Unmarshal([]byte(`{"version":3,"proxy":{"port":80},"appearance":{"theme":"x","accent":"y","corners":"z"}}`), &bad); err != nil {
+		t.Fatal(err)
+	}
+	bad.Normalize()
+	if bad.Proxy.Port != DefaultProxyPort || bad.Appearance != Defaults().Appearance {
+		t.Fatalf("invalid settings were kept: %+v %+v", bad.Proxy, bad.Appearance)
+	}
+}

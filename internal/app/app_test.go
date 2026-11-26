@@ -17,18 +17,21 @@ import (
 )
 
 type fakeEngine struct {
-	mu        sync.Mutex
-	state     model.State
-	stats     model.Stats
-	logs      []model.LogEntry
-	started   int
-	stopped   int
-	restarted int
-	pinged    int
-	startErr  error
-	stopErr   error
-	cfg       config.Config
-	paths     map[string]string
+	mu         sync.Mutex
+	state      model.State
+	stats      model.Stats
+	logs       []model.LogEntry
+	started    int
+	stopped    int
+	restarted  int
+	pinged     int
+	startErr   error
+	stopErr    error
+	cfg        config.Config
+	paths      map[string]string
+	proxyAddr  string
+	lastConfig []byte
+	conns      []model.Connection
 }
 
 func (f *fakeEngine) Start(cfg config.Config, paths map[string]string) error {
@@ -41,6 +44,12 @@ func (f *fakeEngine) Start(cfg config.Config, paths map[string]string) error {
 	}
 	f.cfg = cfg
 	f.paths = paths
+	if cfg.TUN.Enabled {
+		f.proxyAddr = ""
+	} else if f.proxyAddr == "" {
+		f.proxyAddr = "127.0.0.1:2080"
+	}
+	f.lastConfig = []byte(`{"log":{"level":"info"}}`)
 	f.state = model.StateRunning
 	return nil
 }
@@ -50,6 +59,7 @@ func (f *fakeEngine) Stop() error {
 	defer f.mu.Unlock()
 	f.stopped++
 	f.state = model.StateStopped
+	f.proxyAddr = ""
 	return f.stopErr
 }
 
@@ -74,6 +84,24 @@ func (f *fakeEngine) Stats() model.Stats {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.stats
+}
+
+func (f *fakeEngine) Connections() []model.Connection {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]model.Connection(nil), f.conns...)
+}
+
+func (f *fakeEngine) ProxyAddress() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.proxyAddr
+}
+
+func (f *fakeEngine) LastConfig() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]byte(nil), f.lastConfig...)
 }
 
 func (f *fakeEngine) Logs() ([]model.LogEntry, uint64) {
@@ -115,6 +143,28 @@ type fakeRules struct {
 	status []rulesets.Status
 	update func(context.Context, ...string) error
 }
+
+type fakeSystemProxy struct {
+	enabled  int
+	restored int
+	address  string
+	err      error
+	pending  bool
+}
+
+func (f *fakeSystemProxy) Enable(address string) error {
+	f.enabled++
+	f.address = address
+	return f.err
+}
+
+func (f *fakeSystemProxy) Restore() error {
+	f.restored++
+	f.pending = false
+	return f.err
+}
+
+func (f *fakeSystemProxy) Pending() bool { return f.pending }
 
 func (f *fakeRules) Paths() map[string]string  { return f.paths }
 func (f *fakeRules) Status() []rulesets.Status { return f.status }
@@ -511,5 +561,63 @@ func TestSavesConfiguration(t *testing.T) {
 	}
 	if loaded.Routing.Mode != config.ModeGlobal {
 		t.Fatalf("mode = %q", loaded.Routing.Mode)
+	}
+}
+
+func TestProxyModeEnablesAndRestoresSystemProxy(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	cfg.TUN.Enabled = false
+	eng := &fakeEngine{state: model.StateStopped}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	proxy := &fakeSystemProxy{}
+	a.deps.SystemProxy = proxy
+	a.elevatedFlag = false
+
+	a.start()
+	if eng.started != 1 {
+		t.Fatalf("start calls = %d", eng.started)
+	}
+	if proxy.enabled != 1 || proxy.address != "127.0.0.1:2080" {
+		t.Fatalf("system proxy = %+v", proxy)
+	}
+	if a.proxyAddr != "127.0.0.1:2080" {
+		t.Fatalf("proxy address = %q", a.proxyAddr)
+	}
+
+	a.stop()
+	if proxy.restored != 1 {
+		t.Fatalf("restore calls = %d", proxy.restored)
+	}
+	if a.proxyAddr != "" {
+		t.Fatalf("proxy address after stop = %q", a.proxyAddr)
+	}
+}
+
+func TestProxyModeRollsBackWhenSystemProxyFails(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	cfg.TUN.Enabled = false
+	eng := &fakeEngine{state: model.StateStopped}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	a.deps.SystemProxy = &fakeSystemProxy{err: errors.New("denied")}
+
+	a.doStart(cfg, nil, 0)
+	if eng.State() != model.StateStopped {
+		t.Fatalf("engine state = %q", eng.State())
+	}
+	if a.err == "" {
+		t.Fatal("error was not shown")
+	}
+}
+
+func TestTUNModeDoesNotTouchSystemProxy(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	eng := &fakeEngine{state: model.StateStopped}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	proxy := &fakeSystemProxy{}
+	a.deps.SystemProxy = proxy
+
+	a.doStart(cfg, nil, 0)
+	if proxy.enabled != 0 || proxy.restored != 0 {
+		t.Fatalf("system proxy calls = %+v", proxy)
 	}
 }

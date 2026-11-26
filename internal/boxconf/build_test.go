@@ -440,3 +440,44 @@ func TestBuildDuplicateTags(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestBuildSystemProxyMode(t *testing.T) {
+	cfg := sampleConfig()
+	cfg.TUN.Enabled = false
+	data, warnings, err := Build(Input{
+		Config:       cfg,
+		RuleSetPaths: nil,
+		ExeName:      "qbox.exe",
+		CacheFile:    `C:\cache\cache.db`,
+		ProxyPort:    2080,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v (warnings %v)", err, warnings)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	inbounds := doc["inbounds"].([]any)
+	if len(inbounds) != 1 {
+		t.Fatalf("inbounds = %#v", inbounds)
+	}
+	mixed := inbounds[0].(map[string]any)
+	if mixed["type"] != "mixed" || mixed["listen"] != "127.0.0.1" || mixed["listen_port"] != float64(2080) {
+		t.Fatalf("mixed inbound = %#v", mixed)
+	}
+	if _, ok := mixed["auto_route"]; ok {
+		t.Fatalf("mixed inbound has TUN options: %#v", mixed)
+	}
+	if doc["route"].(map[string]any)["final"] != "node1" {
+		t.Fatalf("route = %#v", doc["route"])
+	}
+}
+
+func TestBuildSystemProxyRequiresPort(t *testing.T) {
+	cfg := sampleConfig()
+	cfg.TUN.Enabled = false
+	if _, _, err := Build(Input{Config: cfg}); err == nil {
+		t.Fatal("proxy mode without a port was accepted")
+	}
+}

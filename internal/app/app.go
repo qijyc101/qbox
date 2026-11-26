@@ -3,6 +3,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -29,6 +30,9 @@ type Engine interface {
 	LastError() string
 	Warning() string
 	Stats() model.Stats
+	Connections() []model.Connection
+	ProxyAddress() string
+	LastConfig() []byte
 	Logs() ([]model.LogEntry, uint64)
 	LogRevision() uint64
 	ClearLogs()
@@ -55,6 +59,7 @@ type Deps struct {
 	Engine        Engine
 	Fetcher       Fetcher
 	RuleSets      RuleSets
+	SystemProxy   platform.SystemProxy
 	ResourcesDir  string
 	ConfigPath    string
 	CacheDir      string
@@ -110,6 +115,9 @@ type App struct {
 	quitting     bool
 	elevating    bool
 	elevatedFlag bool
+	// proxyAddr is the local mixed inbound address while proxy mode runs.
+	proxyAddr        string
+	elevateAfterStop bool
 
 	nodeList  ui.ListState
 	logList   ui.ListState
@@ -133,6 +141,9 @@ type App struct {
 func New(deps Deps) *App {
 	if deps.Elevated == nil {
 		deps.Elevated = platform.IsElevated
+	}
+	if deps.SystemProxy == nil {
+		deps.SystemProxy = platform.NoopSystemProxy{}
 	}
 	cfg := deps.Config.Clone()
 	cfg.Normalize()
@@ -162,6 +173,13 @@ func New(deps Deps) *App {
 
 // Open creates the main window and starts polling the engine.
 func (a *App) Open() {
+	if a.deps.SystemProxy.Pending() {
+		if err := a.deps.SystemProxy.Restore(); err != nil {
+			a.warn = "Не удалось вернуть прежние настройки прокси: " + err.Error()
+		} else {
+			a.notice = "Прежние настройки системного прокси восстановлены."
+		}
+	}
 	a.win = mygo.NewWindow(mygo.WindowOptions{
 		Title:     "qbox",
 		Width:     1000,
@@ -217,6 +235,7 @@ func (a *App) Shutdown() {
 	}
 	a.saveNow()
 	a.deps.Engine.Close()
+	a.restoreSystemProxy()
 	if a.tray != nil {
 		a.tray.Destroy()
 		a.tray = nil
@@ -243,14 +262,17 @@ func (a *App) startPolling() {
 					lastErr := a.deps.Engine.LastError()
 					warning := a.deps.Engine.Warning()
 					logRev := a.deps.Engine.LogRevision()
+					proxyAddr := a.deps.Engine.ProxyAddress()
 
-					changed := state != a.state || stats != a.stats || logRev != a.logRev || warning != a.warn
+					changed := state != a.state || stats != a.stats || logRev != a.logRev ||
+						warning != a.warn || proxyAddr != a.proxyAddr
 					if !changed {
 						return
 					}
 					a.state = state
 					a.stats = stats
 					a.warn = warning
+					a.proxyAddr = proxyAddr
 					if logRev != a.logRev {
 						a.logs, a.logRev = a.deps.Engine.Logs()
 					}
@@ -315,7 +337,7 @@ func (a *App) start() {
 	if a.busy || a.workBusy || a.elevating || a.closed.Load() || a.state == model.StateRunning || a.state == model.StateStarting {
 		return
 	}
-	if !a.elevated() {
+	if a.cfg.TUN.Enabled && !a.elevated() {
 		a.requestElevation()
 		return
 	}
@@ -385,11 +407,20 @@ func (a *App) doStart(cfg config.Config, paths map[string]string, rev int) {
 		return
 	}
 	err := a.deps.Engine.Start(cfg, paths)
+	proxyAddr := ""
+	if err == nil && !cfg.TUN.Enabled {
+		proxyAddr, err = a.enableSystemProxy()
+		if err != nil {
+			_ = a.deps.Engine.Stop()
+			proxyAddr = ""
+		}
+	}
 
 	a.post(func() {
 		a.busy = false
 		a.busyTS = ""
 		a.state = a.deps.Engine.State()
+		a.proxyAddr = proxyAddr
 		a.updateTray()
 		if err != nil {
 			a.err = err.Error()
@@ -403,6 +434,24 @@ func (a *App) doStart(cfg config.Config, paths map[string]string, rev int) {
 			a.win.Invalidate()
 		}
 	})
+}
+
+func (a *App) enableSystemProxy() (string, error) {
+	address := a.deps.Engine.ProxyAddress()
+	if address == "" {
+		return "", errors.New("локальный прокси не запустился")
+	}
+	if err := a.deps.SystemProxy.Enable(address); err != nil {
+		return "", fmt.Errorf("системный прокси: %w", err)
+	}
+	return address, nil
+}
+
+func (a *App) restoreSystemProxy() error {
+	if err := a.deps.SystemProxy.Restore(); err != nil {
+		return fmt.Errorf("восстановление системного прокси: %w", err)
+	}
+	return nil
 }
 
 func (a *App) stop() {
@@ -424,10 +473,14 @@ func (a *App) doStop() {
 		return
 	}
 	err := a.deps.Engine.Stop()
+	if proxyErr := a.restoreSystemProxy(); err == nil {
+		err = proxyErr
+	}
 	a.post(func() {
 		a.busy = false
 		a.busyTS = ""
 		a.state = a.deps.Engine.State()
+		a.proxyAddr = ""
 		a.updateTray()
 		if err != nil {
 			a.err = err.Error()
@@ -436,11 +489,25 @@ func (a *App) doStop() {
 		if a.win != nil {
 			a.win.Invalidate()
 		}
+		if a.elevateAfterStop {
+			a.elevateAfterStop = false
+			a.requestElevation()
+		}
 	})
 }
 
 func (a *App) restartNow() {
 	if a.busy || a.workBusy || a.closed.Load() {
+		return
+	}
+	if a.cfg.TUN.Enabled && !a.elevated() {
+		switch a.state {
+		case model.StateRunning, model.StateStarting, model.StateError:
+			a.elevateAfterStop = true
+			a.stop()
+		default:
+			a.requestElevation()
+		}
 		return
 	}
 	a.busy = true
@@ -460,11 +527,26 @@ func (a *App) doRestart(cfg config.Config, paths map[string]string, rev int) {
 	if a.closed.Load() {
 		return
 	}
-	err := a.deps.Engine.Restart(cfg, paths)
+	err := a.restoreSystemProxy()
+	proxyAddr := ""
+	if err == nil {
+		err = a.deps.Engine.Restart(cfg, paths)
+	}
+	if err == nil && !cfg.TUN.Enabled {
+		proxyAddr, err = a.enableSystemProxy()
+		if err != nil {
+			_ = a.deps.Engine.Stop()
+			proxyAddr = ""
+		}
+	}
+	if err != nil {
+		proxyAddr = a.deps.Engine.ProxyAddress()
+	}
 	a.post(func() {
 		a.busy = false
 		a.busyTS = ""
 		a.state = a.deps.Engine.State()
+		a.proxyAddr = proxyAddr
 		a.updateTray()
 		if err != nil {
 			a.err = err.Error()
@@ -476,6 +558,10 @@ func (a *App) doRestart(cfg config.Config, paths map[string]string, rev int) {
 		a.refreshLogs()
 		if a.win != nil {
 			a.win.Invalidate()
+		}
+		if a.elevateAfterStop {
+			a.elevateAfterStop = false
+			a.requestElevation()
 		}
 	})
 }

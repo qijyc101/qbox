@@ -65,6 +65,7 @@ func main() {
 		Engine:       engine,
 		Fetcher:      subscription.NewClient(),
 		RuleSets:     rules,
+		SystemProxy:  platform.NewSystemProxy(filepath.Join(dir, "system-proxy.json")),
 		ResourcesDir: resourcesDir,
 		ConfigPath:   store.Path(),
 		CacheDir:     cacheDir,
