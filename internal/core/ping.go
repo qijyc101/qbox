@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	pingTimeout     = 5 * time.Second
-	pingConcurrency = 4
+	pingTimeout     = 6 * time.Second
+	pingWatchdog    = 12 * time.Second
+	pingConcurrency = 6
 )
 
 var pingTarget = M.ParseSocksaddrHostPort("www.gstatic.com", 443)
@@ -28,43 +29,65 @@ var pingTarget = M.ParseSocksaddrHostPort("www.gstatic.com", 443)
 // Ping measures the latency of every node through its proxy protocol. Each
 // node gets a short-lived sing-box instance without TUN or inbounds, so a
 // ping works while disconnected and does not disturb the main engine.
-func (e *Engine) Ping(ctx context.Context, nodes []config.Node) []model.PingResult {
-	results := make([]model.PingResult, len(nodes))
+//
+// Results arrive as each node finishes; the channel closes when all nodes
+// have been tested or the context is canceled.
+func (e *Engine) Ping(ctx context.Context, nodes []config.Node) <-chan model.PingResult {
+	out := make(chan model.PingResult, len(nodes))
 	if len(nodes) == 0 {
-		return results
+		close(out)
+		return out
 	}
 
-	jobs := make(chan int, len(nodes))
-	for i := range nodes {
-		jobs <- i
-	}
-	close(jobs)
+	go func() {
+		defer close(out)
 
-	workers := pingConcurrency
-	if workers > len(nodes) {
-		workers = len(nodes)
-	}
-	var wg sync.WaitGroup
-	wg.Add(workers)
-	for w := 0; w < workers; w++ {
-		go func() {
-			defer wg.Done()
-			for i := range jobs {
-				results[i] = e.pingOne(ctx, nodes[i], pingTarget)
-			}
-		}()
-	}
-	wg.Wait()
-
-	for i := range results {
-		if results[i].Tag == "" {
-			results[i] = model.PingResult{Tag: nodes[i].Tag, Err: "отменено"}
+		jobs := make(chan int, len(nodes))
+		for i := range nodes {
+			jobs <- i
 		}
-		if results[i].Err != "" {
-			e.logs.WriteMessage(log.LevelWarn, fmt.Sprintf("пинг %s: %s", results[i].Tag, results[i].Err))
+		close(jobs)
+
+		workers := pingConcurrency
+		if workers > len(nodes) {
+			workers = len(nodes)
 		}
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for w := 0; w < workers; w++ {
+			go func() {
+				defer wg.Done()
+				for i := range jobs {
+					result := e.pingWatched(ctx, nodes[i])
+					if result.Err != "" && ctx.Err() == nil {
+						e.logs.WriteMessage(log.LevelWarn, fmt.Sprintf("пинг %s: %s", result.Tag, result.Err))
+					}
+					out <- result
+				}
+			}()
+		}
+		wg.Wait()
+	}()
+	return out
+}
+
+// pingWatched bounds the whole node test, including creating and starting
+// the temporary sing-box instance, so a stuck outbound cannot block the UI.
+func (e *Engine) pingWatched(ctx context.Context, node config.Node) model.PingResult {
+	result := make(chan model.PingResult, 1)
+	go func() {
+		result <- e.pingOne(ctx, node, pingTarget)
+	}()
+	timer := time.NewTimer(pingWatchdog)
+	defer timer.Stop()
+	select {
+	case value := <-result:
+		return value
+	case <-ctx.Done():
+		return model.PingResult{Tag: node.Tag, Err: ctx.Err().Error()}
+	case <-timer.C:
+		return model.PingResult{Tag: node.Tag, Err: "таймаут"}
 	}
-	return results
 }
 
 func (e *Engine) pingOne(ctx context.Context, node config.Node, target M.Socksaddr) model.PingResult {
@@ -97,9 +120,9 @@ func (e *Engine) pingOne(ctx context.Context, node config.Node, target M.Socksad
 		return result
 	}
 
-	boxCtx := include.Context(context.Background())
-	boxCtx, cancelBox := context.WithCancel(boxCtx)
+	boxCtx, cancelBox := context.WithTimeout(ctx, pingWatchdog)
 	defer cancelBox()
+	boxCtx = include.Context(boxCtx)
 
 	opts, err := singjson.UnmarshalExtendedContext[option.Options](boxCtx, data)
 	if err != nil {

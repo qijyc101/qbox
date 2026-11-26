@@ -158,11 +158,11 @@ func (a *App) serversPage(c *ui.Context) {
 		ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, "Подписки").FontSize(18).Bold().Grow(1)
 			if !a.adding && len(a.cfg.ActiveNodes()) > 0 {
-				label := "Пинг всех"
 				if a.pinging {
-					label = "Пинг…"
+					ui.Button(c, fmt.Sprintf("Отмена (%d/%d)", a.pingDone, a.pingTotal)).OnClick(a.cancelPing)
+				} else {
+					ui.Button(c, "Пинг всех").Disabled(a.busy).OnClick(a.pingNodes)
 				}
-				ui.Button(c, label).Disabled(a.pinging || a.busy).OnClick(a.pingNodes)
 			}
 			if !a.adding {
 				ui.Button(c, "Добавить подписку").OnClick(func() {

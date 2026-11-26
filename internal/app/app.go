@@ -30,7 +30,7 @@ type Engine interface {
 	Stats() model.Stats
 	Logs() ([]model.LogEntry, uint64)
 	ClearLogs()
-	Ping(context.Context, []config.Node) []model.PingResult
+	Ping(context.Context, []config.Node) <-chan model.PingResult
 }
 
 // Fetcher downloads a subscription.
@@ -88,6 +88,8 @@ type App struct {
 	pinging    bool
 	pingGen    int
 	pingCancel context.CancelFunc
+	pingDone   int
+	pingTotal  int
 
 	tray        *mygo.Tray
 	trayConnect *mygo.MenuItem
@@ -435,6 +437,7 @@ func (a *App) addSubscription(name, rawURL string, nodes []config.Node, warnings
 	a.addName = ""
 	a.addURL = ""
 	a.nodeList = ui.ListState{}
+	a.cancelPing()
 	a.clearPings()
 	if len(warnings) > 0 {
 		a.notice = fmt.Sprintf("Импортировано %d нод, пропущено %d", len(nodes), len(warnings))
@@ -460,6 +463,7 @@ func (a *App) replaceSubscription(id string, nodes []config.Node, warnings []str
 		a.cfg.SelectedNode = "auto"
 	}
 	a.nodeList = ui.ListState{}
+	a.cancelPing()
 	a.clearPings()
 	if a.state == model.StateRunning {
 		a.dirty = true
@@ -583,6 +587,7 @@ func (a *App) deleteSubscription(id string) {
 	}
 	a.confirmDel = ""
 	a.nodeList = ui.ListState{}
+	a.cancelPing()
 	a.clearPings()
 	a.saveNow()
 	if a.state == model.StateRunning {
@@ -602,6 +607,7 @@ func (a *App) selectSubscription(id string) {
 	a.cfg.SelectedNode = "auto"
 	a.nodeList = ui.ListState{}
 	a.nodeIndex = 0
+	a.cancelPing()
 	a.clearPings()
 	a.saveNow()
 	if a.state == model.StateRunning {
@@ -676,6 +682,24 @@ func (a *App) routingChanged() {
 
 func (a *App) clearPings() {
 	a.pings = make(map[string]model.PingResult)
+	a.pingDone = 0
+	a.pingTotal = 0
+}
+
+func (a *App) cancelPing() {
+	if !a.pinging {
+		return
+	}
+	a.pingGen++
+	if a.pingCancel != nil {
+		a.pingCancel()
+		a.pingCancel = nil
+	}
+	a.pinging = false
+	a.notice = "Пинг отменён"
+	if a.win != nil {
+		a.win.Invalidate()
+	}
 }
 
 func (a *App) pingNodes() {
@@ -700,28 +724,35 @@ func (a *App) pingNodes() {
 	gen := a.pingGen
 	a.pinging = true
 	a.clearPings()
+	a.pingTotal = len(work)
 	a.notice = ""
 
 	run := func() {
 		defer cancel()
-		results := a.deps.Engine.Ping(ctx, work)
+		ok := 0
+		for result := range a.deps.Engine.Ping(ctx, work) {
+			if result.Err == "" {
+				ok++
+			}
+			value := result
+			a.post(func() {
+				if gen != a.pingGen {
+					return
+				}
+				a.pings[value.Tag] = value
+				a.pingDone++
+				if a.win != nil {
+					a.win.Invalidate()
+				}
+			})
+		}
 		a.post(func() {
 			if gen != a.pingGen {
 				return
 			}
 			a.pinging = false
 			a.pingCancel = nil
-			ok := 0
-			for i, result := range results {
-				if result.Tag == "" {
-					result.Tag = work[i].Tag
-				}
-				a.pings[result.Tag] = result
-				if result.Err == "" {
-					ok++
-				}
-			}
-			a.notice = fmt.Sprintf("Пинг: %d из %d ответили", ok, len(results))
+			a.notice = fmt.Sprintf("Пинг: %d из %d ответили", ok, len(work))
 			if a.win != nil {
 				a.win.Invalidate()
 			}

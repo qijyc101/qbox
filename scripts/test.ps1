@@ -5,6 +5,7 @@ $env:CGO_ENABLED = "0"
 
 Write-Host "Tests without UI"
 go test ./internal/config ./internal/subscription ./internal/rulesets ./internal/boxconf ./internal/core ./internal/platform
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Some Windows antivirus configurations block a freshly linked test
 # executable in %TEMP%. Build it into the workspace and run it there.
@@ -22,8 +23,10 @@ if ($code -ne 0) { exit $code }
 
 Write-Host "go vet"
 go vet ./...
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "mygo vet"
 go tool mygo vet .
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "All checks passed"

@@ -78,14 +78,15 @@ func (f *fakeEngine) ClearLogs() {
 	f.logs = nil
 }
 
-func (f *fakeEngine) Ping(ctx context.Context, nodes []config.Node) []model.PingResult {
+func (f *fakeEngine) Ping(ctx context.Context, nodes []config.Node) <-chan model.PingResult {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.pinged++
-	results := make([]model.PingResult, len(nodes))
-	for i, node := range nodes {
-		results[i] = model.PingResult{Tag: node.Tag, Latency: 123 * time.Millisecond}
+	f.mu.Unlock()
+	results := make(chan model.PingResult, len(nodes))
+	for _, node := range nodes {
+		results <- model.PingResult{Tag: node.Tag, Latency: 123 * time.Millisecond}
 	}
+	close(results)
 	return results
 }
 
