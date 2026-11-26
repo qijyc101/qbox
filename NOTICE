@@ -44,7 +44,8 @@ https://www.wintun.net/
 
 The official prebuilt, signed wintun.dll files are redistributed unmodified
 alongside qbox under the license included in the official Wintun 0.14.1
-archive. They are used only through the documented Wintun API by sing-tun.
+archive; a copy is in third_party/wintun/LICENSE.txt. They are used only
+through the documented Wintun API by sing-tun.
 
 Rule-set data
 -------------

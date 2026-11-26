@@ -4,7 +4,7 @@ $env:GOFLAGS = "-tags=with_gvisor,with_quic,with_utls,with_grpc"
 $env:CGO_ENABLED = "0"
 
 Write-Host "Tests without UI"
-go test ./internal/config ./internal/subscription ./internal/rulesets ./internal/boxconf ./internal/core
+go test ./internal/config ./internal/subscription ./internal/rulesets ./internal/boxconf ./internal/core ./internal/platform
 
 # Some Windows antivirus configurations block a freshly linked test
 # executable in %TEMP%. Build it into the workspace and run it there.

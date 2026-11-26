@@ -23,6 +23,9 @@ func (a *App) view(c *ui.Context) {
 		if a.notice != "" {
 			ui.Text(c, a.notice).TextColor(t.TextMuted).FontSize(12)
 		}
+		if a.err != "" && a.page != 0 {
+			ui.Text(c, a.err).TextColor(t.Danger).FontSize(12)
+		}
 		switch a.page {
 		case 0:
 			a.connectionPage(c)

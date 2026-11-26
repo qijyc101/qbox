@@ -700,7 +700,9 @@ func (a *App) openLogFolder() {
 		return
 	}
 	_ = os.MkdirAll(dir, 0o700)
-	a.notice = "Логи: " + dir
+	if err := mygo.Shell.OpenPath(dir); err != nil {
+		a.err = "Не удалось открыть папку логов: " + err.Error()
+	}
 }
 
 func subscriptionName(rawURL string) string {
@@ -822,7 +824,7 @@ func (a *App) logLines() []model.LogEntry {
 				out = append(out, entry)
 			}
 		case "error":
-			if entry.Level == "error" {
+			if entry.Level == "error" || entry.Level == "fatal" || entry.Level == "panic" {
 				out = append(out, entry)
 			}
 		}
