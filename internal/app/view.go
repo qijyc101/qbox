@@ -300,7 +300,7 @@ func (a *App) routingPage(c *ui.Context) {
 		ui.Text(c, "Global — весь трафик через прокси; LAN и блокировка рекламы действуют по настройкам. Rules — списки и гео-правила; Direct — без прокси.").TextColor(t.TextMuted).FontSize(12)
 
 		a.switchRow(c, "Обход локальной сети", &a.cfg.Routing.BypassLAN, "Приватные IP идут напрямую.")
-		a.switchRow(c, "Обход РФ", &a.cfg.Routing.BypassRU, "Домены и IP РФ идут напрямую (rule-sets).")
+		a.switchRow(c, "Обход РФ", &a.cfg.Routing.BypassRU, "Домены и IP РФ идут напрямую; DNS для доменов РФ — системный (rule-sets).")
 		a.switchRow(c, "Блокировать рекламу", &a.cfg.Routing.BlockAds, "geosite-category-ads-all отклоняется.")
 
 		ui.Text(c, "Базы правил").FontSize(16).Bold()
@@ -323,6 +323,7 @@ func (a *App) routingPage(c *ui.Context) {
 			a.routingChanged()
 		})
 		ui.Text(c, "Direct: домены").TextColor(t.TextMuted).FontSize(12)
+		ui.Text(c, "Домены и их поддомены идут напрямую; DNS для них резолвится системным (корпоративным) сервером, а не через прокси.").TextColor(t.TextMuted).FontSize(12)
 		ui.TextArea(c, &a.directText).Lines(2, 5).OnChange(func() {
 			a.cfg.Routing.DirectDomains = config.SplitList(a.directText)
 			a.routingChanged()

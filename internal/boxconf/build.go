@@ -48,8 +48,15 @@ type logOptions struct {
 
 type dnsOptions struct {
 	Servers  []dnsServer `json:"servers"`
+	Rules    []dnsRule   `json:"rules,omitempty"`
 	Final    string      `json:"final,omitempty"`
 	Strategy string      `json:"strategy,omitempty"`
+}
+
+type dnsRule struct {
+	DomainSuffix []string `json:"domain_suffix,omitempty"`
+	RuleSet      []string `json:"rule_set,omitempty"`
+	Server       string   `json:"server"`
 }
 
 type dnsServer struct {
@@ -199,8 +206,27 @@ func Build(in Input) ([]byte, []string, error) {
 		warnings = append(warnings, remoteWarning)
 	}
 
-	rules, usedRuleSets, ruleWarnings := buildRules(cfg, final, in.ExeName, in.RuleSetPaths)
+	rulesMode := cfg.Routing.Mode == config.ModeRules
+	var directDomains []string
+	if rulesMode {
+		directDomains = cleanDomains(cfg.Routing.DirectDomains, &warnings, "direct")
+	}
+	rules, usedRuleSets, ruleWarnings := buildRules(cfg, final, in.ExeName, in.RuleSetPaths, directDomains)
 	warnings = append(warnings, ruleWarnings...)
+
+	// The remote resolver goes through the proxy and cannot resolve
+	// corporate or LAN names. Domains routed directly must also be resolved
+	// by the system resolver, otherwise the private answer is replaced by a
+	// public/NXDOMAIN answer from the remote DNS.
+	var dnsRules []dnsRule
+	if remoteDNS != nil && rulesMode {
+		if len(directDomains) > 0 {
+			dnsRules = append(dnsRules, dnsRule{DomainSuffix: directDomains, Server: "local"})
+		}
+		if _, ok := usedRuleSets["geosite-ru"]; ok {
+			dnsRules = append(dnsRules, dnsRule{RuleSet: []string{"geosite-ru"}, Server: "local"})
+		}
+	}
 
 	rulesets := make([]ruleSet, 0, len(usedRuleSets))
 	usedTags := make([]string, 0, len(usedRuleSets))
@@ -249,6 +275,7 @@ func Build(in Input) ([]byte, []string, error) {
 		},
 		DNS: dnsOptions{
 			Servers:  dnsServers,
+			Rules:    dnsRules,
 			Final:    dnsFinal,
 			Strategy: dnsStrategy,
 		},
@@ -349,7 +376,7 @@ func buildRemoteDNS(dns config.DNS, final string) (*dnsServer, string) {
 	return server, ""
 }
 
-func buildRules(cfg config.Config, final, exeName string, ruleSetPaths map[string]string) ([]rule, map[string]string, []string) {
+func buildRules(cfg config.Config, final, exeName string, ruleSetPaths map[string]string, directDomains []string) ([]rule, map[string]string, []string) {
 	var warnings []string
 	used := make(map[string]string)
 	rules := make([]rule, 0, 8)
@@ -386,8 +413,8 @@ func buildRules(cfg config.Config, final, exeName string, ruleSetPaths map[strin
 		}
 	}
 	if rulesMode {
-		if domains := cleanDomains(cfg.Routing.DirectDomains, &warnings, "direct"); len(domains) > 0 {
-			rules = append(rules, rule{Action: "route", Outbound: "direct", DomainSuffix: domains})
+		if len(directDomains) > 0 {
+			rules = append(rules, rule{Action: "route", Outbound: "direct", DomainSuffix: directDomains})
 		}
 		if cidrs := cleanCIDRs(cfg.Routing.DirectCIDRs, &warnings, "direct"); len(cidrs) > 0 {
 			rules = append(rules, rule{Action: "route", Outbound: "direct", IPCIDR: cidrs})

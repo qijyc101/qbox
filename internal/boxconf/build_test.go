@@ -1,9 +1,14 @@
 package boxconf
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/sagernet/sing-box/include"
+	"github.com/sagernet/sing-box/option"
+	singjson "github.com/sagernet/sing/common/json"
 
 	"qbox/internal/config"
 )
@@ -142,6 +147,20 @@ func TestBuildRulesMode(t *testing.T) {
 	if remote["type"] != "https" || remote["server"] != "1.1.1.1" || remote["detour"] != "node1" {
 		t.Fatalf("remote dns = %#v", remote)
 	}
+	dnsRules := dns["rules"].([]any)
+	if len(dnsRules) != 2 {
+		t.Fatalf("dns rules = %#v", dnsRules)
+	}
+	directDNS := dnsRules[0].(map[string]any)
+	suffixes := directDNS["domain_suffix"].([]any)
+	if directDNS["server"] != "local" || len(suffixes) != 1 || suffixes[0] != "example.org" {
+		t.Fatalf("direct dns rule = %#v", directDNS)
+	}
+	ruDNS := dnsRules[1].(map[string]any)
+	ruSets := ruDNS["rule_set"].([]any)
+	if ruDNS["server"] != "local" || len(ruSets) != 1 || ruSets[0] != "geosite-ru" {
+		t.Fatalf("ru dns rule = %#v", ruDNS)
+	}
 
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "bad-value") {
 		t.Fatalf("warnings = %v", warnings)
@@ -230,6 +249,29 @@ func TestBuildInvalidDNSFallsBackToLocal(t *testing.T) {
 	}
 }
 
+func TestBuildConfigAcceptedBySingBox(t *testing.T) {
+	cfg := sampleConfig()
+	cfg.Routing.DirectDomains = []string{"geocad.ru"}
+	paths := map[string]string{
+		"geosite-ru":  `C:\rules\geosite-ru.srs`,
+		"geoip-ru":    `C:\rules\geoip-ru.srs`,
+		"geosite-ads": `C:\rules\ads.srs`,
+	}
+	data, warnings, err := Build(Input{
+		Config:       cfg,
+		RuleSetPaths: paths,
+		ExeName:      "qbox.exe",
+		CacheFile:    `C:\cache\cache.db`,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v (warnings %v)", err, warnings)
+	}
+	ctx := include.Context(context.Background())
+	if _, err := singjson.UnmarshalExtendedContext[option.Options](ctx, data); err != nil {
+		t.Fatalf("sing-box rejects the generated config: %v", err)
+	}
+}
+
 func TestBuildDirectModeAllowsNoNodes(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Routing.Mode = config.ModeDirect
@@ -278,6 +320,10 @@ func TestBuildGlobalIgnoresSplitRules(t *testing.T) {
 				}
 			}
 		}
+	}
+	dns := doc["dns"].(map[string]any)
+	if _, ok := dns["rules"]; ok {
+		t.Fatalf("split DNS rules leaked into Global: %#v", dns["rules"])
 	}
 	// Ads blocking and LAN bypass still apply in Global.
 	foundAds := false
