@@ -4,5 +4,9 @@
   "version": "0.1.0",
   "out": "build",
   "copyright": "Copyright (C) 2026 qbox contributors",
-  "publisher": "qbox contributors"
+  "publisher": "qbox contributors",
+  "license": "GPL-3.0-only",
+  "windows": {
+    "installerInclude": "packaging/installer.nsh"
+  }
 }

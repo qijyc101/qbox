@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -34,6 +35,9 @@ func (a *App) titleBar(c *ui.Context, d design) {
 				a.fileMenu(c, d)
 				a.routingMenu(c, d)
 				a.settingsButton(c, d)
+				if a.settingsOpen {
+					a.homeButton(c, d)
+				}
 			})
 			ui.Text(c, "").Grow(1)
 			a.windowControls(c, d, height)
@@ -77,7 +81,7 @@ func (a *App) windowButton(c *ui.Context, d design, svg *ui.SVG, label string, h
 	btn := ui.ButtonBase(c).Width(windowControlWidth).Height(height).Center().Label(label).Tooltip(label)
 	switch {
 	case close && btn.Hovered():
-		btn.Background(ui.Hex("#e81123"))
+		btn.Background(ui.Hex(windowCloseHover))
 	case btn.Hovered():
 		btn.Background(d.T.SurfaceHover)
 	}
@@ -109,6 +113,15 @@ func (a *App) menuTrigger(c *ui.Context, d design, label string, svg *ui.SVG, op
 	return trigger
 }
 
+func (a *App) switchMenuOnHover(trigger ui.Element, open, other *bool) {
+	if *open || !*other || !trigger.Hovered() {
+		return
+	}
+	*other = false
+	*open = true
+	a.invalidate()
+}
+
 func (a *App) menuOptions(d design, open *bool) ui.PopoverMenuButtonOptions {
 	return ui.PopoverMenuButtonOptions{
 		At:   ui.AnchorBottomStart,
@@ -129,30 +142,79 @@ func (a *App) menuOptions(d design, open *bool) ui.PopoverMenuButtonOptions {
 
 func (a *App) fileMenu(c *ui.Context, d design) {
 	trigger := a.menuTrigger(c, d, "Файл", iconFileJson, &a.fileMenuOpen)
+	a.switchMenuOnHover(trigger, &a.fileMenuOpen, &a.routingMenuOpen)
+	row, exitAt := 0, 0
+	options := a.menuOptions(d, &a.fileMenuOpen)
+	baseItem := options.Item
+	options.Item = func(item ui.Element) {
+		row++
+		baseItem(item)
+		if row == exitAt && item.Highlighted() {
+			item.Background(ui.Hex(windowCloseHover)).TextColor(ui.Hex("#ffffff"))
+		}
+	}
 	trigger.PopoverMenuButton(func(m *ui.Menu) {
+		row, exitAt = 0, 0
 		if m.Item("config.json").Icon(menuIconFile).Subtitle("настройки qbox").Chosen() {
 			a.openTextViewer(viewerConfig)
 		}
+		exitAt++
 		if m.Item("Конфигурация sing-box").Icon(menuIconRoute).Subtitle("последняя применённая").Chosen() {
 			a.openTextViewer(viewerSingBox)
 		}
+		exitAt++
 		if m.Item("Журнал qbox").Icon(menuIconScroll).Subtitle("qbox.log").Chosen() {
 			a.openTextViewer(viewerLog)
 		}
+		exitAt++
+		m.Separator()
+		if m.Item("Папка qbox").Icon(menuIconFolder).Subtitle("config.json и журналы").Chosen() {
+			a.openDataFolder()
+		}
+		exitAt++
+		if m.Item("Папка логов").Icon(menuIconFolder).Subtitle("qbox.log").Chosen() {
+			a.openLogFolder()
+		}
+		exitAt++
 		m.Separator()
 		if m.Item("Выход").Icon(menuIconX).Danger().Chosen() {
 			mygo.App.Quit()
 		}
-	}, a.menuOptions(d, &a.fileMenuOpen))
+		exitAt++
+	}, options)
 }
 
 func (a *App) routingMenu(c *ui.Context, d design) {
 	trigger := a.menuTrigger(c, d, "Маршрутизация", iconRoute, &a.routingMenuOpen)
+	a.switchMenuOnHover(trigger, &a.routingMenuOpen, &a.fileMenuOpen)
 	trigger.PopoverMenuButton(func(m *ui.Menu) {
 		for i := range a.cfg.RoutingProfiles {
 			profile := a.cfg.RoutingProfiles[i]
 			active := profile.ID == a.cfg.ActiveRoutingProfileID
-			if m.Item(profile.Name).Checked(active).Chosen() {
+			item := m.Item(profile.Name).ID(profile.ID)
+			item.Content(func(content ui.MenuItemContent) {
+				pc := content.Context
+				ui.Row(pc).Grow(1).AlignItems(ui.Center).Gap(8).Children(func() {
+					if active {
+						ui.Icon(pc, iconCheck).Size(12, 12).TextColor(content.Text)
+					} else {
+						ui.Box(pc).Size(12, 12)
+					}
+					ui.Text(pc, profile.Name).FontSize(13).Grow(1)
+					edit := ui.ButtonBase(pc).Size(22, 22).Radius(6).Center().
+						Label("Редактировать " + profile.Name)
+					if edit.Hovered() {
+						edit.Background(content.Muted.Alpha(0.18))
+					}
+					edit.Children(func() {
+						ui.Icon(pc, iconPencil).Size(12, 12).TextColor(content.Muted)
+					})
+					if edit.Clicked() {
+						a.editProfile(profile.ID)
+					}
+				})
+			})
+			if item.Chosen() {
 				a.selectRoutingProfile(profile.ID)
 			}
 		}
@@ -160,17 +222,14 @@ func (a *App) routingMenu(c *ui.Context, d design) {
 		if m.Item("Новый профиль…").Icon(menuIconPlus).Disabled(len(a.cfg.RoutingProfiles) >= config.MaxRoutingProfiles).Chosen() {
 			a.openNewProfile()
 		}
-		if m.Item("Переименовать…").Icon(menuIconPencil).Disabled(a.cfg.ActiveRoutingProfile() == nil).Chosen() {
-			a.openRenameProfile()
-		}
-		if m.Item("Удалить…").Icon(menuIconTrash).Disabled(len(a.cfg.RoutingProfiles) <= 1).Danger().Chosen() {
-			a.openDeleteProfile()
-		}
-		m.Separator()
-		if m.Item("Просмотр всех маршрутов…").Icon(menuIconSettings).Chosen() {
-			a.openRoutingWindow()
-		}
 	}, a.menuOptions(d, &a.routingMenuOpen))
+}
+
+func (a *App) editProfile(id string) {
+	if id != a.cfg.ActiveRoutingProfileID {
+		a.selectRoutingProfile(id)
+	}
+	a.openProfileEditor()
 }
 
 func (a *App) settingsButton(c *ui.Context, d design) {
@@ -188,6 +247,21 @@ func (a *App) settingsButton(c *ui.Context, d design) {
 	if btn.Clicked() {
 		a.settingsOpen = !a.settingsOpen
 		a.err = ""
+		a.invalidate()
+	}
+}
+
+func (a *App) homeButton(c *ui.Context, d design) {
+	btn := ui.ButtonBase(c).Padding(6, 10).Gap(6).Radius(d.RadiusS)
+	if btn.Hovered() {
+		btn.Background(d.T.SurfaceHover)
+	}
+	btn.Children(func() {
+		ui.Icon(c, iconArrowLeft).Size(14, 14).TextColor(d.T.TextMuted)
+		ui.Text(c, "На главную").FontSize(13)
+	})
+	if btn.Clicked() {
+		a.settingsOpen = false
 		a.invalidate()
 	}
 }
@@ -263,7 +337,7 @@ func (a *App) subscriptionsSidebar(c *ui.Context, d design) {
 func (a *App) subscriptionRow(c *ui.Context, d design, sub config.Subscription) {
 	t := d.T
 	active := a.cfg.ActiveSubscription == sub.ID
-	row := ui.ButtonBase(c).FillWidth().Padding(6, 8).Radius(d.RadiusM)
+	row := ui.ButtonBase(c).FillWidth().Padding(6, 8).Gap(8).Radius(d.RadiusM).AlignItems(ui.Start)
 	switch {
 	case active:
 		row.Background(t.Accent.Alpha(0.10))
@@ -274,17 +348,41 @@ func (a *App) subscriptionRow(c *ui.Context, d design, sub config.Subscription) 
 		ui.Box(c).Size(32, 32).Radius(d.RadiusS).Background(avatarColor(sub.ID)).Center().Children(func() {
 			ui.Text(c, strings.ToUpper(avatarLetter(sub.Name))).FontSize(14).Bold().TextColor(ui.Hex("#ffffff"))
 		})
-		ui.Row(c).Gap(6).AlignItems(ui.Center).Grow(1).Children(func() {
-			if active {
-				ui.Box(c).Size(6, 6).Radius(3).Background(t.Accent)
+		ui.Column(c).Gap(1).Grow(1).Children(func() {
+			ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+				if active {
+					ui.Box(c).Size(6, 6).Radius(3).Background(t.Accent)
+				}
+				ui.Text(c, sub.Name).FontSize(13).Grow(1).SingleLine()
+			})
+			ui.Text(c, displaySubscriptionURL(sub.URL)).FontSize(11).TextColor(t.TextMuted).SingleLine()
+			updated := "ещё не обновлялась"
+			if !sub.UpdatedAt.IsZero() {
+				updated = "обновлено " + sub.UpdatedAt.Format("02.01.2006 15:04:05")
 			}
-			ui.Text(c, sub.Name).FontSize(13).Grow(1)
+			ui.Text(c, updated).FontSize(11).TextColor(t.TextMuted).SingleLine()
 		})
 		a.subscriptionMenu(c, d, sub)
 	})
 	if row.Clicked() {
 		a.selectSubscription(sub.ID)
 	}
+}
+
+func displaySubscriptionURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return "ссылка скрыта"
+	}
+	display := u.Scheme
+	if display == "" {
+		display = "https"
+	}
+	display += "://" + u.Host
+	if strings.Trim(u.EscapedPath(), "/") != "" {
+		display += "/…"
+	}
+	return display
 }
 
 func (a *App) subscriptionMenu(c *ui.Context, d design, sub config.Subscription) {
@@ -341,7 +439,7 @@ func (a *App) contentToolbar(c *ui.Context, d design) {
 	t := d.T
 	tabs := a.panel
 	ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-		ui.Segmented(c, &tabs, "Ноды", "Логи", "Подключения").Width(260).OnChange(func() {
+		ui.Segmented(c, &tabs, "Ноды", "Логи", "Подключения").OnChange(func() {
 			a.panel = tabs
 			a.refreshConnections()
 			a.invalidate()
@@ -454,7 +552,7 @@ func (a *App) logsView(c *ui.Context, d design) {
 	ui.Column(c).Grow(1).Gap(8).Children(func() {
 		filter := a.logView
 		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-			ui.Segmented(c, &filter, "Все", "Info", "Warn", "Error").Width(300).OnChange(func() {
+			ui.Segmented(c, &filter, "Все", "Info", "Warn", "Error").OnChange(func() {
 				a.logView = filter
 			})
 			ui.Text(c, "").Grow(1)
@@ -536,7 +634,6 @@ func (a *App) trafficCard(c *ui.Context, d design) {
 	t := d.T
 	ui.Column(c).Height(170).Padding(12).Gap(6).Background(t.Surface).Radius(d.RadiusL).Border(1, t.Border).Children(func() {
 		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "Трафик").FontSize(13).Bold()
 			color := t.TextMuted
 			switch a.state {
 			case model.StateRunning:

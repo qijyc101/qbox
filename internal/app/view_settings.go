@@ -11,10 +11,6 @@ func (a *App) settingsPage(c *ui.Context, d design) {
 	t := d.T
 	ui.Column(c).Grow(1).Background(t.Background).Children(func() {
 		ui.Row(c).Padding(12, 12, 4, 12).Gap(10).AlignItems(ui.Center).Children(func() {
-			iconButton(c, "Назад", iconArrowLeft, false).OnClick(func() {
-				a.settingsOpen = false
-				a.invalidate()
-			})
 			ui.Text(c, "Настройки").FontSize(20).Bold()
 			ui.Text(c, "").Grow(1)
 			if a.dirty && a.state == model.StateRunning {
@@ -39,6 +35,27 @@ func (a *App) settingsPage(c *ui.Context, d design) {
 				}
 				a.dnsSettings(c, d)
 			})
+			a.settingsCard(c, d, iconPower, "Запуск", func() {
+				launch := a.cfg.Startup.LaunchAtLogin
+				a.settingsSwitch(c, d, "Запускать qbox при входе в Windows",
+					"Добавляет qbox в автозапуск текущего пользователя.",
+					&launch, func() { a.setLaunchAtLogin(launch) })
+				connect := a.cfg.Startup.AutoConnect
+				a.settingsSwitch(c, d, "Подключаться при запуске qbox",
+					"Сразу запускает выбранную ноду после открытия. Для TUN Windows запросит права администратора.",
+					&connect, func() { a.setAutoConnect(connect) })
+			})
+			a.settingsCard(c, d, iconActivity, "Пинг", func() {
+				auto := a.cfg.Ping.Auto
+				a.settingsSwitch(c, d, "Автоматический пинг",
+					"Каждые 30 секунд, пока qbox запущен.",
+					&auto, func() { a.setAutoPing(auto) })
+				last := "ещё не выполнялся"
+				if !a.lastPingAt.IsZero() {
+					last = a.lastPingAt.Format("02.01.2006 15:04:05")
+				}
+				ui.Text(c, "Последний пинг: "+last).FontSize(11).TextColor(t.TextMuted)
+			})
 			a.settingsCard(c, d, iconScrollText, "Журнал", func() {
 				level := a.logLevelIndex()
 				ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
@@ -46,19 +63,9 @@ func (a *App) settingsPage(c *ui.Context, d design) {
 						ui.Text(c, "Уровень логирования")
 						ui.Text(c, "Подробные уровни нужны только для диагностики.").FontSize(11).TextColor(t.TextMuted)
 					})
-					ui.Segmented(c, &level, "Info", "Debug", "Trace").Width(260).OnChange(func() {
+					ui.Segmented(c, &level, "Info", "Debug", "Trace").OnChange(func() {
 						a.setLogLevel(level)
 					})
-				})
-			})
-			a.settingsCard(c, d, iconFolderOpen, "Файлы", func() {
-				ui.Text(c, "Конфиг: "+a.deps.ConfigPath).FontSize(11).TextColor(t.TextMuted).Wrap()
-				ui.Text(c, "Кэш: "+a.deps.CacheDir).FontSize(11).TextColor(t.TextMuted).Wrap()
-				if dir, err := config.LogDir(); err == nil {
-					ui.Text(c, "Логи: "+dir).FontSize(11).TextColor(t.TextMuted).Wrap()
-				}
-				ui.Row(c).Gap(8).Children(func() {
-					iconButton(c, "Открыть папку логов", iconFolderOpen, false).OnClick(a.openLogFolder)
 				})
 			})
 			a.settingsCard(c, d, iconInfo, "О программе", func() {
@@ -98,7 +105,7 @@ func (a *App) themeRow(c *ui.Context, d design) {
 	theme := a.themeIndex()
 	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
 		ui.Text(c, "Тема").Grow(1)
-		ui.Segmented(c, &theme, "Системная", "Светлая", "Тёмная").Width(300).OnChange(func() {
+		ui.Segmented(c, &theme, "Системная", "Светлая", "Тёмная").OnChange(func() {
 			a.setThemeIndex(theme)
 		})
 	})
@@ -132,7 +139,7 @@ func (a *App) cornersRow(c *ui.Context, d design) {
 	corners := a.cornersIndex()
 	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
 		ui.Text(c, "Скругления").Grow(1)
-		ui.Segmented(c, &corners, "Компактные", "Мягкие", "Крупные").Width(300).OnChange(func() {
+		ui.Segmented(c, &corners, "Компактные", "Мягкие", "Крупные").OnChange(func() {
 			a.setCornersIndex(corners)
 		})
 	})
@@ -147,7 +154,7 @@ func (a *App) tunSettings(c *ui.Context, d design) {
 			ui.Text(c, "Стек")
 			ui.Text(c, "Mixed требует сборки с with_gvisor; System быстрее, gVisor универсальнее.").FontSize(11).TextColor(t.TextMuted).Wrap()
 		})
-		ui.Segmented(c, &stack, "System", "Mixed", "gVisor").Width(260).OnChange(func() {
+		ui.Segmented(c, &stack, "System", "Mixed", "gVisor").OnChange(func() {
 			a.setStack(stack)
 		})
 	})

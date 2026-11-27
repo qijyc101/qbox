@@ -17,6 +17,7 @@ const (
 
 	titleBarMinHeight  = 40
 	windowControlWidth = 40
+	windowCloseHover   = "#e81123"
 )
 
 // design carries the theme and the design tokens of a frame.

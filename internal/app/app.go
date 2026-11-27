@@ -65,6 +65,7 @@ type Deps struct {
 	CacheDir      string
 	ConfigWarning string
 	Autostart     bool
+	LoginItem     LoginItem
 	Elevated      func() bool
 }
 
@@ -113,6 +114,8 @@ type App struct {
 	pingCancel context.CancelFunc
 	pingDone   int
 	pingTotal  int
+	lastPingAt time.Time
+	autoPingAt time.Time
 
 	fetchCancel context.CancelFunc
 	rsCancel    context.CancelFunc
@@ -142,15 +145,10 @@ type App struct {
 	subRenaming  string
 	subNameDraft string
 	subDeleting  string
-	directText   string
-	directCIDRs  string
-	proxyText    string
-	proxyCIDRs   string
 
-	profileCreating  bool
-	profileRenaming  bool
-	profileNameDraft string
-	profileDeleting  string
+	profileCreating      bool
+	profileDeleteConfirm bool
+	profileNameDraft     string
 }
 
 // New creates the app state.
@@ -160,6 +158,9 @@ func New(deps Deps) *App {
 	}
 	if deps.SystemProxy == nil {
 		deps.SystemProxy = platform.NoopSystemProxy{}
+	}
+	if deps.LoginItem == nil {
+		deps.LoginItem = mygoLoginItem{}
 	}
 	cfg := deps.Config.Clone()
 	cfg.Normalize()
@@ -174,10 +175,6 @@ func New(deps Deps) *App {
 		viewers:      make(map[textViewer]*textView),
 		elevatedFlag: deps.Elevated(),
 	}
-	a.directText = config.JoinList(cfg.Routing.DirectDomains)
-	a.directCIDRs = config.JoinList(cfg.Routing.DirectCIDRs)
-	a.proxyText = config.JoinList(cfg.Routing.ProxyDomains)
-	a.proxyCIDRs = config.JoinList(cfg.Routing.ProxyCIDRs)
 	a.profileNameDraft = ""
 	if profile := cfg.ActiveRoutingProfile(); profile != nil {
 		a.profileNameDraft = profile.Name
@@ -224,8 +221,8 @@ func (a *App) Open() {
 	})
 	a.startPolling()
 	a.initTray()
-	if a.deps.Autostart && a.deps.Elevated() {
-		a.startEngine()
+	if a.shouldAutoConnect() {
+		a.start()
 	}
 }
 
@@ -280,6 +277,7 @@ func (a *App) startPolling() {
 					if a.closed.Load() {
 						return
 					}
+					a.maybeAutoPing(time.Now())
 					state := a.deps.Engine.State()
 					stats := a.deps.Engine.Stats()
 					lastErr := a.deps.Engine.LastError()
@@ -1057,13 +1055,6 @@ func (a *App) copyText(text string) {
 	a.invalidate()
 }
 
-func (a *App) reloadRoutingFields() {
-	a.directText = config.JoinList(a.cfg.Routing.DirectDomains)
-	a.directCIDRs = config.JoinList(a.cfg.Routing.DirectCIDRs)
-	a.proxyText = config.JoinList(a.cfg.Routing.ProxyDomains)
-	a.proxyCIDRs = config.JoinList(a.cfg.Routing.ProxyCIDRs)
-}
-
 func (a *App) activeRoutingProfileName() string {
 	if profile := a.cfg.ActiveRoutingProfile(); profile != nil {
 		return profile.Name
@@ -1079,9 +1070,6 @@ func (a *App) selectRoutingProfile(id string) {
 	if !a.cfg.SelectRoutingProfile(id) {
 		return
 	}
-	a.reloadRoutingFields()
-	a.profileRenaming = false
-	a.profileDeleting = ""
 	profile := a.cfg.ActiveRoutingProfile()
 	name := id
 	if profile != nil {
@@ -1099,9 +1087,7 @@ func (a *App) selectRoutingProfile(id string) {
 	if changed && a.state == model.StateRunning {
 		a.restartNow()
 	}
-	if a.win != nil {
-		a.invalidate()
-	}
+	a.invalidate()
 }
 
 func (a *App) saveNewProfile() {
@@ -1118,9 +1104,7 @@ func (a *App) saveNewProfile() {
 		return
 	}
 	a.cfg.SelectRoutingProfile(id)
-	a.reloadRoutingFields()
 	a.profileCreating = false
-	a.profileDeleting = ""
 	if profile := a.cfg.ActiveRoutingProfile(); profile != nil {
 		a.profileNameDraft = profile.Name
 	}
@@ -1128,6 +1112,7 @@ func (a *App) saveNewProfile() {
 	a.notice = "Создан профиль маршрутизации «" + a.activeRoutingProfileName() + "»"
 	a.saveNow()
 	a.closeChild(winNewProfile)
+	a.openProfileEditor()
 	a.invalidate()
 }
 
@@ -1138,34 +1123,29 @@ func (a *App) saveRoutingProfileName() {
 		a.invalidate()
 		return
 	}
-	a.profileRenaming = false
 	a.profileNameDraft = name
 	a.err = ""
 	a.notice = "Профиль переименован: «" + name + "»"
+	if w := a.children[winRouting]; w != nil {
+		w.SetTitle("Профиль " + name)
+	}
 	a.saveNow()
-	a.closeChild(winRenameProfile)
 	a.invalidate()
 }
 
-func (a *App) confirmDeleteRoutingProfile() {
-	id := a.profileDeleting
-	if id == "" {
-		return
-	}
-	a.profileDeleting = ""
-	a.closeChild(winDeleteProfile)
-	previous := a.cfg.Routing.Clone()
-	wasActive := id == a.cfg.ActiveRoutingProfileID
-	if !a.cfg.DeleteRoutingProfile(id) {
-		return
-	}
-	if !wasActive {
-		a.notice = "Профиль маршрутизации удалён."
-		a.saveNow()
+func (a *App) deleteActiveProfile() {
+	if len(a.cfg.RoutingProfiles) <= 1 {
+		a.profileDeleteConfirm = false
+		a.notice = "Нельзя удалить единственный профиль маршрутизации."
 		a.invalidate()
 		return
 	}
-	a.reloadRoutingFields()
+	previous := a.cfg.Routing.Clone()
+	id := a.cfg.ActiveRoutingProfileID
+	if !a.cfg.DeleteRoutingProfile(id) {
+		return
+	}
+	a.profileDeleteConfirm = false
 	if profile := a.cfg.ActiveRoutingProfile(); profile != nil {
 		a.profileNameDraft = profile.Name
 	}
@@ -1175,6 +1155,7 @@ func (a *App) confirmDeleteRoutingProfile() {
 	}
 	a.notice = "Профиль удалён; выбран «" + a.activeRoutingProfileName() + "»"
 	a.saveNow()
+	a.closeChild(winRouting)
 	if changed && a.state == model.StateRunning {
 		a.restartNow()
 	}
@@ -1187,6 +1168,39 @@ func (a *App) clearPings() {
 	a.pingTotal = 0
 }
 
+func (a *App) maybeAutoPing(now time.Time) {
+	if !a.cfg.Ping.Auto || a.closed.Load() || a.pinging || a.busy || a.workBusy {
+		return
+	}
+	if len(a.cfg.ActiveNodes()) == 0 {
+		return
+	}
+	if a.autoPingAt.IsZero() {
+		a.autoPingAt = now.Add(30 * time.Second)
+		return
+	}
+	if now.Before(a.autoPingAt) {
+		return
+	}
+	a.startPing(true)
+}
+
+func (a *App) setAutoPing(enabled bool) {
+	if a.cfg.Ping.Auto == enabled {
+		return
+	}
+	a.cfg.Ping.Auto = enabled
+	if enabled {
+		a.autoPingAt = time.Now().Add(30 * time.Second)
+		a.notice = "Автоматический пинг включён: каждые 30 секунд"
+	} else {
+		a.autoPingAt = time.Time{}
+		a.notice = "Автоматический пинг выключен"
+	}
+	a.scheduleSave()
+	a.invalidate()
+}
+
 func (a *App) cancelPing() {
 	if !a.pinging {
 		return
@@ -1197,6 +1211,7 @@ func (a *App) cancelPing() {
 		a.pingCancel = nil
 	}
 	a.pinging = false
+	a.autoPingAt = time.Now().Add(30 * time.Second)
 	a.notice = "Пинг отменён"
 	if a.win != nil {
 		a.invalidate()
@@ -1204,6 +1219,10 @@ func (a *App) cancelPing() {
 }
 
 func (a *App) pingNodes() {
+	a.startPing(false)
+}
+
+func (a *App) startPing(auto bool) {
 	if a.pinging || a.busy || a.workBusy || a.closed.Load() {
 		return
 	}
@@ -1224,9 +1243,15 @@ func (a *App) pingNodes() {
 	a.pingGen++
 	gen := a.pingGen
 	a.pinging = true
+	a.autoPingAt = time.Now().Add(30 * time.Second)
 	a.clearPings()
 	a.pingTotal = len(work)
-	a.notice = ""
+	if !auto {
+		a.notice = ""
+	}
+	if a.win != nil {
+		a.invalidate()
+	}
 
 	run := func() {
 		defer cancel()
@@ -1253,7 +1278,10 @@ func (a *App) pingNodes() {
 			}
 			a.pinging = false
 			a.pingCancel = nil
-			a.notice = fmt.Sprintf("Пинг: %d из %d ответили", ok, len(work))
+			a.lastPingAt = time.Now()
+			if !auto {
+				a.notice = fmt.Sprintf("Пинг: %d из %d ответили", ok, len(work))
+			}
 			if a.win != nil {
 				a.invalidate()
 			}
@@ -1376,6 +1404,14 @@ func (a *App) openLogFolder() {
 	_ = os.MkdirAll(dir, 0o700)
 	if err := mygo.Shell.OpenPath(dir); err != nil {
 		a.err = "Не удалось открыть папку логов: " + err.Error()
+	}
+}
+
+func (a *App) openDataFolder() {
+	dir := a.deps.Store.Dir()
+	_ = os.MkdirAll(dir, 0o700)
+	if err := mygo.Shell.OpenPath(dir); err != nil {
+		a.err = "Не удалось открыть папку qbox: " + err.Error()
 	}
 }
 

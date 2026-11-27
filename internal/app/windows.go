@@ -20,8 +20,6 @@ const (
 	winRenameSub       childWindow = "rename-subscription"
 	winDeleteSub       childWindow = "delete-subscription"
 	winNewProfile      childWindow = "new-profile"
-	winRenameProfile   childWindow = "rename-profile"
-	winDeleteProfile   childWindow = "delete-profile"
 	winRouting         childWindow = "routing"
 	winConfig          childWindow = "config"
 	winSingBox         childWindow = "singbox"
@@ -76,6 +74,23 @@ func (a *App) openChild(key childWindow, options mygo.WindowOptions, view func(*
 	}
 	options.Parent = a.win
 	options.Content = ui.View(view)
+	options.Frameless = true
+	options.CornerRadius = 10
+	options.DisableResize = true
+	options.DisableMaximize = true
+	options.DisableFullScreen = true
+	if a.win != nil && options.Width > 0 && options.Height > 0 {
+		x, y := a.win.Position()
+		width, height := a.win.Size()
+		if options.Width < width {
+			options.X = x + (width-options.Width)/2
+		}
+		if options.Height < height {
+			options.Y = y + (height-options.Height)/2
+		} else {
+			options.Y = y
+		}
+	}
 	if options.BackgroundColor == "" {
 		options.BackgroundColor = windowBackground
 	}
@@ -124,10 +139,8 @@ func (a *App) childClosed(key childWindow) {
 		a.subDeleting = ""
 	case winNewProfile:
 		a.profileCreating = false
-	case winRenameProfile:
-		a.profileRenaming = false
-	case winDeleteProfile:
-		a.profileDeleting = ""
+	case winRouting:
+		a.profileDeleteConfirm = false
 	case winConfig:
 		delete(a.viewers, viewerConfig)
 	case winSingBox:
@@ -147,12 +160,10 @@ func (a *App) openAddSubscription() {
 	a.addURL = ""
 	a.err = ""
 	a.openChild(winAddSubscription, mygo.WindowOptions{
-		Title:     "Новая подписка",
-		Width:     480,
-		Height:    340,
-		MinWidth:  420,
-		MinHeight: 300,
-		Modal:     true,
+		Title:  "Новая подписка",
+		Width:  480,
+		Height: 340,
+		Modal:  true,
 	}, a.addSubscriptionView)
 	a.invalidate()
 }
@@ -169,12 +180,10 @@ func (a *App) openRenameSubscription(id string) {
 	a.subNameDraft = sub.Name
 	a.err = ""
 	a.openChild(winRenameSub, mygo.WindowOptions{
-		Title:     "Переименовать подписку",
-		Width:     440,
-		Height:    230,
-		MinWidth:  380,
-		MinHeight: 200,
-		Modal:     true,
+		Title:  "Переименовать подписку",
+		Width:  440,
+		Height: 230,
+		Modal:  true,
 	}, a.renameSubscriptionView)
 	a.invalidate()
 }
@@ -189,12 +198,10 @@ func (a *App) openDeleteSubscription(id string) {
 	a.subDeleting = id
 	a.err = ""
 	a.openChild(winDeleteSub, mygo.WindowOptions{
-		Title:     "Удалить подписку",
-		Width:     440,
-		Height:    220,
-		MinWidth:  380,
-		MinHeight: 190,
-		Modal:     true,
+		Title:  "Удалить подписку",
+		Width:  440,
+		Height: 220,
+		Modal:  true,
 	}, a.deleteSubscriptionView)
 	a.invalidate()
 }
@@ -212,75 +219,31 @@ func (a *App) openNewProfile() {
 	a.profileNameDraft = fmt.Sprintf("Профиль %d", len(a.cfg.RoutingProfiles)+1)
 	a.err = ""
 	a.openChild(winNewProfile, mygo.WindowOptions{
-		Title:     "Новый профиль",
-		Width:     460,
-		Height:    230,
-		MinWidth:  400,
-		MinHeight: 200,
-		Modal:     true,
+		Title:  "Новый профиль",
+		Width:  460,
+		Height: 230,
+		Modal:  true,
 	}, a.newProfileView)
 	a.invalidate()
 }
 
-func (a *App) openRenameProfile() {
-	if a.focusChild(winRenameProfile) {
-		return
-	}
-	profile := a.cfg.ActiveRoutingProfile()
-	if profile == nil {
-		return
-	}
-	a.profileRenaming = true
-	a.profileNameDraft = profile.Name
-	a.err = ""
-	a.openChild(winRenameProfile, mygo.WindowOptions{
-		Title:     "Переименовать профиль",
-		Width:     460,
-		Height:    230,
-		MinWidth:  400,
-		MinHeight: 200,
-		Modal:     true,
-	}, a.renameProfileView)
-	a.invalidate()
-}
-
-func (a *App) openDeleteProfile() {
-	if len(a.cfg.RoutingProfiles) <= 1 {
-		a.notice = "Нельзя удалить единственный профиль маршрутизации."
-		a.invalidate()
-		return
-	}
-	if a.focusChild(winDeleteProfile) {
-		return
-	}
-	profile := a.cfg.ActiveRoutingProfile()
-	if profile == nil {
-		return
-	}
-	a.profileDeleting = profile.ID
-	a.err = ""
-	a.openChild(winDeleteProfile, mygo.WindowOptions{
-		Title:     "Удалить профиль",
-		Width:     440,
-		Height:    220,
-		MinWidth:  380,
-		MinHeight: 190,
-		Modal:     true,
-	}, a.deleteProfileView)
-	a.invalidate()
-}
-
-func (a *App) openRoutingWindow() {
+func (a *App) openProfileEditor() {
 	if a.focusChild(winRouting) {
 		return
 	}
+	profile := a.cfg.ActiveRoutingProfile()
+	if profile == nil {
+		return
+	}
+	a.profileNameDraft = profile.Name
+	a.profileDeleteConfirm = false
 	a.openChild(winRouting, mygo.WindowOptions{
-		Title:     "Маршруты",
-		Width:     700,
-		Height:    780,
-		MinWidth:  560,
-		MinHeight: 520,
+		Title:  "Профиль " + profile.Name,
+		Width:  700,
+		Height: 780,
+		Modal:  true,
 	}, a.routingEditorView)
+	a.invalidate()
 }
 
 func (a *App) openTextViewer(kind textViewer) {
@@ -300,11 +263,9 @@ func (a *App) openTextViewer(kind textViewer) {
 	view := a.loadTextViewer(kind)
 	a.viewers[kind] = &view
 	a.openChild(key, mygo.WindowOptions{
-		Title:     title,
-		Width:     780,
-		Height:    640,
-		MinWidth:  520,
-		MinHeight: 360,
+		Title:  title,
+		Width:  780,
+		Height: 640,
 	}, func(c *ui.Context) { a.textViewerView(c, kind) })
 }
 

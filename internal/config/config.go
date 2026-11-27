@@ -81,6 +81,8 @@ type Config struct {
 	TUN                    TUN              `json:"tun"`
 	Proxy                  Proxy            `json:"proxy"`
 	Appearance             Appearance       `json:"appearance"`
+	Startup                Startup          `json:"startup"`
+	Ping                   Ping             `json:"ping"`
 	DNS                    DNS              `json:"dns"`
 	LogLevel               string           `json:"log_level,omitempty"`
 }
@@ -146,6 +148,20 @@ type Appearance struct {
 	Theme   string `json:"theme,omitempty"`
 	Accent  string `json:"accent,omitempty"`
 	Corners string `json:"corners,omitempty"`
+}
+
+// Startup holds the launch preferences.
+type Startup struct {
+	// LaunchAtLogin adds qbox to the current user's Windows Run key.
+	LaunchAtLogin bool `json:"launch_at_login,omitempty"`
+	// AutoConnect connects when qbox starts.
+	AutoConnect bool `json:"auto_connect,omitempty"`
+}
+
+// Ping holds the latency check preferences.
+type Ping struct {
+	// Auto pings the active nodes every 30 seconds while qbox runs.
+	Auto bool `json:"auto,omitempty"`
 }
 
 // DNS holds the resolver settings.

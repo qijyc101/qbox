@@ -42,15 +42,15 @@ var (
 )
 
 var (
-	menuIconFile     = mustMenuIcon(iconFileJson)
-	menuIconRoute    = mustMenuIcon(iconRoute)
-	menuIconScroll   = mustMenuIcon(iconScrollText)
-	menuIconX        = mustMenuIcon(iconX)
-	menuIconPlus     = mustMenuIcon(iconPlus)
-	menuIconPencil   = mustMenuIcon(iconPencil)
-	menuIconTrash    = mustMenuIcon(iconTrash2)
-	menuIconSettings = mustMenuIcon(iconSettings)
-	menuIconRefresh  = mustMenuIcon(iconRefreshCW)
+	menuIconFile    = mustMenuIcon(iconFileJson)
+	menuIconRoute   = mustMenuIcon(iconRoute)
+	menuIconScroll  = mustMenuIcon(iconScrollText)
+	menuIconX       = mustMenuIcon(iconX)
+	menuIconPlus    = mustMenuIcon(iconPlus)
+	menuIconPencil  = mustMenuIcon(iconPencil)
+	menuIconTrash   = mustMenuIcon(iconTrash2)
+	menuIconRefresh = mustMenuIcon(iconRefreshCW)
+	menuIconFolder  = mustMenuIcon(iconFolderOpen)
 )
 
 func mustMenuIcon(svg *ui.SVG) *mygo.MenuIcon {
@@ -59,6 +59,13 @@ func mustMenuIcon(svg *ui.SVG) *mygo.MenuIcon {
 		panic(err)
 	}
 	return icon
+}
+
+func textButton(c *ui.Context, label string, primary bool) ui.Element {
+	if primary {
+		return ui.PrimaryButton(c, label)
+	}
+	return ui.Button(c, label)
 }
 
 func iconButton(c *ui.Context, label string, svg *ui.SVG, primary bool) ui.Element {

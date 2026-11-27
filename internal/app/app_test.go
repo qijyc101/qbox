@@ -17,6 +17,19 @@ import (
 	"qbox/internal/subscription"
 )
 
+type fakeLoginItem struct {
+	enabled bool
+	err     error
+}
+
+func (f *fakeLoginItem) Set(enabled bool) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.enabled = enabled
+	return nil
+}
+
 type fakeEngine struct {
 	mu         sync.Mutex
 	state      model.State
@@ -226,6 +239,7 @@ func newApp(t *testing.T, cfg config.Config, eng *fakeEngine, fetch Fetcher) *Ap
 		RuleSets:   &fakeRules{paths: map[string]string{}},
 		ConfigPath: store.Path(),
 		CacheDir:   t.TempDir(),
+		LoginItem:  &fakeLoginItem{},
 		Elevated:   func() bool { return true },
 	})
 }
@@ -267,7 +281,7 @@ func TestNavigation(t *testing.T) {
 	if !tt.HasText("Внешний вид") || !tt.HasText("Режим TUN") {
 		t.Fatalf("settings texts = %q", tt.Texts())
 	}
-	if err := tt.Click("Назад"); err != nil {
+	if err := tt.Click("На главную"); err != nil {
 		t.Fatal(err)
 	}
 	tt.Frame()
@@ -278,8 +292,53 @@ func TestNavigation(t *testing.T) {
 		t.Fatal(err)
 	}
 	tt.Frame()
-	if !tt.HasText("Просмотр всех маршрутов…") || !tt.HasText("Основной") {
+	if !tt.HasText("Новый профиль…") || !tt.HasText("Основной") {
 		t.Fatalf("routing menu = %q", tt.Texts())
+	}
+}
+
+func TestMenuHoverSwitch(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	eng := &fakeEngine{state: model.StateStopped}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	tt := ui.NewTester(a.view, 1100, 760)
+
+	if err := tt.Click("Файл"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if !tt.HasText("config.json") {
+		t.Fatalf("file menu = %q", tt.Texts())
+	}
+
+	rect, ok := tt.Find("Маршрутизация")
+	if !ok {
+		t.Fatal("routing trigger not found")
+	}
+	tt.Move(rect.X+rect.W/2, rect.Y+rect.H/2)
+	tt.Frame()
+	if !tt.HasText("Новый профиль…") || tt.HasText("config.json") {
+		t.Fatalf("menu after hover = %q", tt.Texts())
+	}
+}
+
+func TestRoutingMenuEditAction(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	eng := &fakeEngine{state: model.StateStopped}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	tt := ui.NewTester(a.view, 1100, 760)
+
+	if err := tt.Click("Маршрутизация"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	a.profileNameDraft = "changed"
+	if err := tt.Click("Редактировать Основной"); err != nil {
+		t.Fatalf("edit action: %v", err)
+	}
+	tt.Frame()
+	if a.profileNameDraft != "Основной" {
+		t.Fatalf("edit action did not open the profile editor: %q", a.profileNameDraft)
 	}
 }
 
@@ -337,18 +396,15 @@ func TestRoutingProfiles(t *testing.T) {
 		t.Fatal("profile switch did not restart the engine")
 	}
 
-	a.openRenameProfile()
+	a.openProfileEditor()
 	a.profileNameDraft = "Личная"
 	a.saveRoutingProfileName()
 	if a.cfg.ActiveRoutingProfile().Name != "Личная" {
 		t.Fatalf("rename = %q", a.cfg.ActiveRoutingProfile().Name)
 	}
 
-	a.openDeleteProfile()
-	if a.profileDeleting == "" {
-		t.Fatal("delete was not requested")
-	}
-	a.confirmDeleteRoutingProfile()
+	a.profileDeleteConfirm = true
+	a.deleteActiveProfile()
 	if len(a.cfg.RoutingProfiles) != 1 || a.cfg.ActiveRoutingProfileID == secondID {
 		t.Fatalf("profiles after delete = %+v active=%q", a.cfg.RoutingProfiles, a.cfg.ActiveRoutingProfileID)
 	}
@@ -717,5 +773,136 @@ func TestHomeLayoutWithManyNodes(t *testing.T) {
 	footer, ok := tt.Find("60 секунд")
 	if !ok || footer.Y+footer.H > 684 {
 		t.Fatalf("the traffic footer does not fit: %+v", footer)
+	}
+}
+
+func TestSubscriptionURLHidden(t *testing.T) {
+	got := displaySubscriptionURL("https://user:pass@example.com/api/sub/SECRET?token=TOKEN")
+	if strings.Contains(got, "SECRET") || strings.Contains(got, "TOKEN") || strings.Contains(got, "user") {
+		t.Fatalf("displaySubscriptionURL = %q", got)
+	}
+	if !strings.Contains(got, "example.com") {
+		t.Fatalf("host is missing: %q", got)
+	}
+}
+
+func TestAutoPing(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	cfg.Ping.Auto = true
+	eng := &fakeEngine{state: model.StateStopped}
+	a := newApp(t, cfg, eng, fakeFetcher{})
+	a.autoPingAt = time.Now().Add(-time.Second)
+	a.maybeAutoPing(time.Now())
+	if eng.pinged != 1 {
+		t.Fatalf("ping calls = %d", eng.pinged)
+	}
+	if a.lastPingAt.IsZero() {
+		t.Fatal("last ping time was not set")
+	}
+	if !a.cfg.Ping.Auto {
+		t.Fatal("auto ping setting was lost")
+	}
+}
+
+func TestRoutingEditorCards(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	a := newApp(t, cfg, &fakeEngine{state: model.StateStopped}, fakeFetcher{})
+	tt := ui.NewTester(a.routingEditorView, 700, 900)
+	tt.Frame()
+	for _, want := range []string{"Название", "Режим", "Правила", "Базы правил", "Свои списки", "Удаление профиля"} {
+		if !tt.HasText(want) {
+			t.Fatalf("the routing editor has no %q card: %q", want, tt.Texts())
+		}
+	}
+	if !tt.HasText("Закрыть") {
+		t.Fatalf("the routing editor has no close button: %q", tt.Texts())
+	}
+}
+
+func TestChildDialogHeader(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	a := newApp(t, cfg, &fakeEngine{state: model.StateStopped}, fakeFetcher{})
+	a.adding = true
+	tt := ui.NewTester(a.addSubscriptionView, 480, 340)
+	tt.Frame()
+	if !tt.HasText("Новая подписка") || !tt.HasText("Закрыть") {
+		t.Fatalf("the dialog header = %q", tt.Texts())
+	}
+}
+
+func TestFileExitHoverRed(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	a := newApp(t, cfg, &fakeEngine{state: model.StateStopped}, fakeFetcher{})
+	tt := ui.NewTester(a.view, 1100, 760)
+
+	if err := tt.Click("Файл"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	exit, ok := tt.Find("Выход")
+	if !ok {
+		t.Fatalf("the exit item is missing: %q", tt.Texts())
+	}
+	tt.Move(exit.X+exit.W/2, exit.Y+exit.H/2)
+	tt.Frame()
+	pixel := tt.Image().RGBAAt(int(exit.X)+10, int(exit.Y+exit.H/2))
+	if pixel.R < 150 || pixel.G > 100 || pixel.B > 100 {
+		t.Fatalf("the exit highlight is %v, want red", pixel)
+	}
+}
+
+func TestStartupSettings(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	a := newApp(t, cfg, &fakeEngine{state: model.StateStopped}, fakeFetcher{})
+	login := &fakeLoginItem{}
+	a.deps.LoginItem = login
+
+	a.setLaunchAtLogin(true)
+	if !login.enabled || !a.cfg.Startup.LaunchAtLogin {
+		t.Fatalf("launch at login = %v, config %v", login.enabled, a.cfg.Startup.LaunchAtLogin)
+	}
+	loaded, err := a.deps.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Startup.LaunchAtLogin {
+		t.Fatal("launch at login was not saved")
+	}
+
+	a.setAutoConnect(true)
+	if !a.cfg.Startup.AutoConnect || !a.shouldAutoConnect() {
+		t.Fatal("auto connect was not saved")
+	}
+	loaded, err = a.deps.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Startup.AutoConnect {
+		t.Fatal("auto connect was not persisted")
+	}
+	a.deps.Autostart = true
+	a.cfg.Startup.AutoConnect = false
+	if !a.shouldAutoConnect() {
+		t.Fatal("an elevated connection relaunch must auto connect")
+	}
+	a.deps.Autostart = false
+
+	a.settingsOpen = true
+	tt := ui.NewTester(a.view, 1120, 1500)
+	tt.Frame()
+	if !tt.HasText("Запускать qbox при входе в Windows") || !tt.HasText("Подключаться при запуске qbox") {
+		t.Fatalf("startup settings = %q", tt.Texts())
+	}
+	a.settingsOpen = false
+
+	a.setLaunchAtLogin(false)
+	if login.enabled || a.cfg.Startup.LaunchAtLogin {
+		t.Fatal("launch at login was not removed")
+	}
+
+	login.err = errors.New("denied")
+	a.setLaunchAtLogin(true)
+	if a.cfg.Startup.LaunchAtLogin || a.err == "" {
+		t.Fatal("a failed autostart change was not reported")
 	}
 }
