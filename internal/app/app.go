@@ -21,6 +21,50 @@ import (
 	"qbox/internal/subscription"
 )
 
+const (
+	pollInterval        = 600 * time.Millisecond
+	saveDelay           = 400 * time.Millisecond
+	subscriptionTimeout = 45 * time.Second
+	autoPingInterval    = 30 * time.Second
+	pingTimeout         = 3 * time.Minute
+	ruleSetTimeout      = 3 * time.Minute
+	allRuleSetsTimeout  = 5 * time.Minute
+)
+
+const (
+	panelNodes = iota
+	panelLogs
+	panelConnections
+)
+
+const (
+	logViewAll = iota
+	logViewInfo
+	logViewWarn
+	logViewError
+)
+
+const (
+	latencyOK      = "ok"
+	latencyError   = "error"
+	latencyPending = "pending"
+)
+
+func (a *App) needsRestart() bool {
+	return a.dirty && a.state == model.StateRunning
+}
+
+func (a *App) working() bool {
+	return a.busy || a.workBusy
+}
+
+func (a *App) workLabel() string {
+	if !a.workBusy {
+		return ""
+	}
+	return a.workTS
+}
+
 // Engine is the part of the core the UI needs.
 type Engine interface {
 	Start(config.Config, map[string]string) error
@@ -62,7 +106,6 @@ type Deps struct {
 	SystemProxy   platform.SystemProxy
 	ResourcesDir  string
 	ConfigPath    string
-	CacheDir      string
 	ConfigWarning string
 	Autostart     bool
 	LoginItem     LoginItem
@@ -196,12 +239,12 @@ func (a *App) Open() {
 	}
 	a.win = mygo.NewWindow(mygo.WindowOptions{
 		Title:           "qbox",
-		Width:           1120,
-		Height:          760,
-		MinWidth:        1000,
-		MinHeight:       600,
+		Width:           mainWindowWidth,
+		Height:          mainWindowHeight,
+		MinWidth:        mainWindowMinWidth,
+		MinHeight:       mainWindowMinHeight,
 		Frameless:       true,
-		CornerRadius:    12,
+		CornerRadius:    mainWindowCornerRadius,
 		BackgroundColor: windowBackground,
 		StateKey:        "main",
 		Content:         ui.View(a.view),
@@ -265,7 +308,7 @@ func (a *App) Shutdown() {
 }
 
 func (a *App) startPolling() {
-	ticker := time.NewTicker(600 * time.Millisecond)
+	ticker := time.NewTicker(pollInterval)
 	go func() {
 		defer ticker.Stop()
 		for {
@@ -287,7 +330,7 @@ func (a *App) startPolling() {
 
 					trafficChanged := a.sampleTraffic(time.Now(), stats)
 					connectionsChanged := false
-					if a.panel == 2 && !a.settingsOpen && state == model.StateRunning {
+					if a.panel == panelConnections && !a.settingsOpen && state == model.StateRunning {
 						conns := a.deps.Engine.Connections()
 						if !sameConnections(a.connections, conns) {
 							a.connections = conns
@@ -353,7 +396,7 @@ func (a *App) scheduleSave() {
 	if a.save != nil {
 		a.save.Stop()
 	}
-	a.save = time.AfterFunc(400*time.Millisecond, func() {
+	a.save = time.AfterFunc(saveDelay, func() {
 		mygo.RunOnMain(func() {
 			if !a.closed.Load() {
 				a.saveNow()
@@ -445,6 +488,10 @@ func (a *App) doStart(cfg config.Config, paths map[string]string, rev int) {
 		}
 	}
 
+	a.postEngineOperation(err, proxyAddr, rev)
+}
+
+func (a *App) postEngineOperation(err error, proxyAddr string, rev int) {
 	a.post(func() {
 		a.busy = false
 		a.busyTS = ""
@@ -460,6 +507,10 @@ func (a *App) doStart(cfg config.Config, paths map[string]string, rev int) {
 		}
 		a.refreshLogs()
 		a.invalidate()
+		if a.elevateAfterStop {
+			a.elevateAfterStop = false
+			a.requestElevation()
+		}
 	})
 }
 
@@ -567,26 +618,7 @@ func (a *App) doRestart(cfg config.Config, paths map[string]string, rev int) {
 	if err != nil {
 		proxyAddr = a.deps.Engine.ProxyAddress()
 	}
-	a.post(func() {
-		a.busy = false
-		a.busyTS = ""
-		a.state = a.deps.Engine.State()
-		a.proxyAddr = proxyAddr
-		a.updateTray()
-		if err != nil {
-			a.err = err.Error()
-		} else {
-			a.dirty = rev != a.cfgRev
-			a.err = ""
-			a.notice = ""
-		}
-		a.refreshLogs()
-		a.invalidate()
-		if a.elevateAfterStop {
-			a.elevateAfterStop = false
-			a.requestElevation()
-		}
-	})
+	a.postEngineOperation(err, proxyAddr, rev)
 }
 
 func (a *App) refreshLogs() {
@@ -710,48 +742,8 @@ func (a *App) importSubscription() {
 		return
 	}
 	name := a.addName
-
-	a.workBusy = true
-	a.workTS = "Загрузка подписки…"
-	if a.fetchCancel != nil {
-		a.fetchCancel()
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	a.fetchCancel = cancel
-	if a.win == nil {
-		a.doImport(ctx, cancel, name, rawURL)
-		return
-	}
-	go a.doImport(ctx, cancel, name, rawURL)
-}
-
-func (a *App) doImport(ctx context.Context, cancel context.CancelFunc, name, rawURL string) {
-	defer cancel()
-	data, err := a.deps.Fetcher.Fetch(ctx, rawURL)
-	if err == nil {
-		var nodes []config.Node
-		var warnings []string
-		nodes, warnings, err = subscription.Parse(data)
-		if err == nil {
-			a.post(func() {
-				a.fetchCancel = nil
-				a.workBusy = false
-				a.workTS = ""
-				a.err = ""
-				a.addSubscription(name, rawURL, nodes, warnings)
-				if a.win != nil {
-					a.invalidate()
-				}
-			})
-			return
-		}
-	}
-	a.post(func() {
-		a.fetchCancel = nil
-		a.workBusy = false
-		a.workTS = ""
-		a.err = "Импорт не удался: " + err.Error()
-		a.invalidate()
+	a.fetchSubscription("Загрузка подписки…", "Импорт не удался", rawURL, func(nodes []config.Node, warnings []string) {
+		a.addSubscription(name, rawURL, nodes, warnings)
 	})
 }
 
@@ -763,40 +755,42 @@ func (a *App) refreshSubscription(id string) {
 	if sub == nil {
 		return
 	}
-	rawURL := sub.URL
+	a.fetchSubscription("Обновление подписки…", "Обновление не удалось", sub.URL, func(nodes []config.Node, warnings []string) {
+		a.replaceSubscription(id, nodes, warnings)
+	})
+}
+
+// fetchSubscription runs the shared download/parse/post pipeline. apply runs
+// on the UI goroutine after a successful parse.
+func (a *App) fetchSubscription(busyText, failureMessage, rawURL string, apply func([]config.Node, []string)) {
 	a.workBusy = true
-	a.workTS = "Обновление подписки…"
+	a.workTS = busyText
 	if a.fetchCancel != nil {
 		a.fetchCancel()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), subscriptionTimeout)
 	a.fetchCancel = cancel
 	run := func() {
 		defer cancel()
 		data, err := a.deps.Fetcher.Fetch(ctx, rawURL)
+		var nodes []config.Node
+		var warnings []string
 		if err == nil {
-			var nodes []config.Node
-			var warnings []string
 			nodes, warnings, err = subscription.Parse(data)
-			if err == nil {
-				a.post(func() {
-					a.fetchCancel = nil
-					a.workBusy = false
-					a.workTS = ""
-					a.err = ""
-					a.replaceSubscription(id, nodes, warnings)
-					if a.win != nil {
-						a.invalidate()
-					}
-				})
-				return
-			}
 		}
 		a.post(func() {
 			a.fetchCancel = nil
 			a.workBusy = false
 			a.workTS = ""
-			a.err = "Обновление не удалось: " + err.Error()
+			if err != nil {
+				a.err = failureMessage + ": " + err.Error()
+				if a.win != nil {
+					a.invalidate()
+				}
+				return
+			}
+			a.err = ""
+			apply(nodes, warnings)
 			if a.win != nil {
 				a.invalidate()
 			}
@@ -1017,7 +1011,7 @@ func (a *App) setTUNEnabled(enabled bool) {
 }
 
 func (a *App) setProxyPort(port int) {
-	if port < 0 || port > 65535 || (port != 0 && port < 1024) {
+	if port < 0 || port > config.MaxPort || (port != 0 && port < config.MinProxyPort) {
 		return
 	}
 	if a.cfg.Proxy.Port == port {
@@ -1028,7 +1022,11 @@ func (a *App) setProxyPort(port int) {
 }
 
 func (a *App) setMTU(mtu int) {
-	if mtu < 576 || mtu > 65535 {
+	minMTU := config.MinMTU
+	if !a.cfg.TUN.DisableIPv6 {
+		minMTU = config.MinMTUIPv6
+	}
+	if mtu < minMTU || mtu > config.MaxMTU {
 		return
 	}
 	if a.cfg.TUN.MTU == mtu {
@@ -1176,7 +1174,7 @@ func (a *App) maybeAutoPing(now time.Time) {
 		return
 	}
 	if a.autoPingAt.IsZero() {
-		a.autoPingAt = now.Add(30 * time.Second)
+		a.autoPingAt = now.Add(autoPingInterval)
 		return
 	}
 	if now.Before(a.autoPingAt) {
@@ -1191,8 +1189,8 @@ func (a *App) setAutoPing(enabled bool) {
 	}
 	a.cfg.Ping.Auto = enabled
 	if enabled {
-		a.autoPingAt = time.Now().Add(30 * time.Second)
-		a.notice = "Автоматический пинг включён: каждые 30 секунд"
+		a.autoPingAt = time.Now().Add(autoPingInterval)
+		a.notice = fmt.Sprintf("Автоматический пинг включён: каждые %d секунд", int(autoPingInterval.Seconds()))
 	} else {
 		a.autoPingAt = time.Time{}
 		a.notice = "Автоматический пинг выключен"
@@ -1211,7 +1209,7 @@ func (a *App) cancelPing() {
 		a.pingCancel = nil
 	}
 	a.pinging = false
-	a.autoPingAt = time.Now().Add(30 * time.Second)
+	a.autoPingAt = time.Now().Add(autoPingInterval)
 	a.notice = "Пинг отменён"
 	if a.win != nil {
 		a.invalidate()
@@ -1238,12 +1236,12 @@ func (a *App) startPing(auto bool) {
 	if a.pingCancel != nil {
 		a.pingCancel()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
 	a.pingCancel = cancel
 	a.pingGen++
 	gen := a.pingGen
 	a.pinging = true
-	a.autoPingAt = time.Now().Add(30 * time.Second)
+	a.autoPingAt = time.Now().Add(autoPingInterval)
 	a.clearPings()
 	a.pingTotal = len(work)
 	if !auto {
@@ -1299,59 +1297,28 @@ func (a *App) latency(tag string) (string, string) {
 	result, ok := a.pings[tag]
 	if !ok {
 		if a.pinging {
-			return "…", "pending"
+			return "…", latencyPending
 		}
 		return "", ""
 	}
 	if result.Err != "" {
-		return "ошибка", "error"
+		return "ошибка", latencyError
 	}
 	if result.Latency < time.Millisecond {
-		return "<1 мс", "ok"
+		return "<1 мс", latencyOK
 	}
-	return fmt.Sprintf("%d мс", result.Latency.Milliseconds()), "ok"
+	return fmt.Sprintf("%d мс", result.Latency.Milliseconds()), latencyOK
 }
 
 func (a *App) updateRuleSet(tag string) {
-	if a.busy || a.workBusy || a.closed.Load() {
-		return
-	}
-	a.workBusy = true
-	a.workTS = "Скачивание баз…"
-	if a.rsCancel != nil {
-		a.rsCancel()
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	a.rsCancel = cancel
-	run := func() {
-		defer cancel()
-		err := a.deps.RuleSets.Update(ctx, tag)
-		a.post(func() {
-			a.rsCancel = nil
-			a.workBusy = false
-			a.workTS = ""
-			if err != nil {
-				a.err = "Базы: " + err.Error()
-			} else {
-				a.err = ""
-				a.notice = "Базы обновлены. Перезапустите подключение, чтобы применить правила."
-			}
-			if a.state == model.StateRunning {
-				a.markConfigChanged()
-			}
-			if a.win != nil {
-				a.invalidate()
-			}
-		})
-	}
-	if a.win == nil {
-		run()
-		return
-	}
-	go run()
+	a.updateRuleSets(ruleSetTimeout, tag)
 }
 
 func (a *App) updateAllRuleSets() {
+	a.updateRuleSets(allRuleSetsTimeout)
+}
+
+func (a *App) updateRuleSets(timeout time.Duration, tags ...string) {
 	if a.busy || a.workBusy || a.closed.Load() {
 		return
 	}
@@ -1360,11 +1327,11 @@ func (a *App) updateAllRuleSets() {
 	if a.rsCancel != nil {
 		a.rsCancel()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	a.rsCancel = cancel
 	run := func() {
 		defer cancel()
-		err := a.deps.RuleSets.Update(ctx)
+		err := a.deps.RuleSets.Update(ctx, tags...)
 		a.post(func() {
 			a.rsCancel = nil
 			a.workBusy = false
@@ -1512,11 +1479,13 @@ func (a *App) setLogLevel(index int) {
 func (a *App) logLines() []model.LogEntry {
 	want := ""
 	switch a.logView {
-	case 1:
+	case logViewAll:
+		want = ""
+	case logViewInfo:
 		want = "info"
-	case 2:
+	case logViewWarn:
 		want = "warn"
-	case 3:
+	case logViewError:
 		want = "error"
 	}
 	if want == "" {

@@ -11,6 +11,7 @@ import (
 	"github.com/egoist/mygo"
 
 	"qbox/internal/app"
+	"qbox/internal/boxconf"
 	"qbox/internal/config"
 	"qbox/internal/core"
 	"qbox/internal/platform"
@@ -18,13 +19,15 @@ import (
 	"qbox/internal/subscription"
 )
 
+const elevationWaitTimeout = 10 * time.Second
+
 func main() {
 	mygo.App.SetName("qbox")
 
 	if pid, ok := waitPIDArg(); ok {
 		// An elevated relaunch must not forward its command line to the old,
 		// unequal instance: wait for it to release the single-instance lock.
-		_ = platform.WaitForProcessExit(pid, 10*time.Second)
+		_ = platform.WaitForProcessExit(pid, elevationWaitTimeout)
 	}
 	if !mygo.App.RequestSingleInstanceLock() {
 		return
@@ -50,7 +53,7 @@ func main() {
 	}
 
 	engine := core.New(core.Options{
-		CacheFile: filepath.Join(cacheDir, "cache.db"),
+		CacheFile: boxconf.CachePath(cacheDir),
 		LogFile:   filepath.Join(logDir, "qbox.log"),
 	})
 	defer engine.Close()
@@ -68,7 +71,6 @@ func main() {
 		SystemProxy:  platform.NewSystemProxy(filepath.Join(dir, "system-proxy.json")),
 		ResourcesDir: resourcesDir,
 		ConfigPath:   store.Path(),
-		CacheDir:     cacheDir,
 		Autostart:    hasArg("--autostart"),
 	}
 	if cfgErr != nil {

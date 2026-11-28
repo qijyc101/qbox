@@ -25,6 +25,11 @@ import (
 	"qbox/internal/model"
 )
 
+const (
+	maxConnections   = 200
+	localhostAddress = "127.0.0.1"
+)
+
 // Options configures an Engine.
 type Options struct {
 	CacheFile string
@@ -175,13 +180,13 @@ func (e *Engine) startLocked(cfg config.Config, ruleSetPaths map[string]string) 
 
 	instance, cancel, traffic, err := e.launch(data)
 	if err != nil && cfg.TUN.Enabled && !cfg.TUN.DisableIPv6 && isIPv6ConfigError(err) {
-		message := "Windows не смогла назначить IPv6-адрес TUN; повтор запуска без IPv6"
+		message := "Система не смогла назначить IPv6-адрес TUN; повтор запуска без IPv6"
 		e.logs.WriteMessage(log.LevelWarn, message)
 		buildInput.DisableIPv6 = true
 		data, warnings, buildErr := boxconf.Build(buildInput)
 		e.logWarnings(warnings)
 		if buildErr == nil {
-			collectedWarnings = append([]string(nil), warnings...)
+			collectedWarnings = append(collectedWarnings, warnings...)
 			instance, cancel, traffic, err = e.launch(data)
 			if err == nil {
 				collectedWarnings = append(collectedWarnings,
@@ -398,7 +403,6 @@ func (e *Engine) Connections() []model.Connection {
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].CreatedAt.After(out[j].CreatedAt)
 	})
-	const maxConnections = 200
 	if len(out) > maxConnections {
 		out = out[:maxConnections]
 	}
@@ -408,9 +412,9 @@ func (e *Engine) Connections() []model.Connection {
 // freeProxyPort returns a free local port and its address. A wanted port is
 // used as is; zero asks the OS for any free port.
 func freeProxyPort(want int) (int, string, error) {
-	listen := "127.0.0.1:0"
+	listen := net.JoinHostPort(localhostAddress, "0")
 	if want != 0 {
-		listen = fmt.Sprintf("127.0.0.1:%d", want)
+		listen = net.JoinHostPort(localhostAddress, fmt.Sprintf("%d", want))
 	}
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
@@ -421,7 +425,7 @@ func freeProxyPort(want int) (int, string, error) {
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
-	return port, fmt.Sprintf("127.0.0.1:%d", port), nil
+	return port, net.JoinHostPort(localhostAddress, fmt.Sprintf("%d", port)), nil
 }
 
 // Logs returns buffered log entries and their revision.

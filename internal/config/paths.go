@@ -9,7 +9,8 @@ import (
 const AppName = "qbox"
 
 // DefaultDir returns the per-user configuration directory:
-// %AppData%\qbox on Windows, ~/.config/qbox elsewhere.
+// %AppData%\qbox on Windows, ~/Library/Application Support/qbox on macOS,
+// and ~/.config/qbox elsewhere.
 func DefaultDir() (string, error) {
 	base, err := os.UserConfigDir()
 	if err != nil {

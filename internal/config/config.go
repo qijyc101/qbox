@@ -43,8 +43,19 @@ const (
 	CornersRound   = "round"
 )
 
-// DefaultProxyPort is zero so the OS picks a free port on each start.
-const DefaultProxyPort = 0
+const (
+	// DefaultProxyPort is zero so the OS picks a free port on each start.
+	DefaultProxyPort = 0
+
+	MinPort      = 1
+	MaxPort      = 65535
+	MinProxyPort = 1024
+
+	MinMTU     = 576
+	MinMTUIPv6 = 1280
+	MaxMTU     = MaxPort
+	DefaultMTU = 9000
+)
 
 // maxRoutingProfileName bounds a profile name shown in the UI.
 const maxRoutingProfileName = 64
@@ -132,8 +143,8 @@ type TUN struct {
 	Stack         string `json:"stack"`
 	MTU           int    `json:"mtu,omitempty"`
 	StrictRoute   bool   `json:"strict_route,omitempty"`
-	// DisableIPv6 keeps the IPv6 address off the TUN interface. Some
-	// Windows installations with IPv6 disabled cannot assign one.
+	// DisableIPv6 keeps IPv6 off the TUN interface on systems that cannot
+	// assign an IPv6 address to it.
 	DisableIPv6 bool `json:"disable_ipv6,omitempty"`
 }
 
@@ -152,7 +163,7 @@ type Appearance struct {
 
 // Startup holds the launch preferences.
 type Startup struct {
-	// LaunchAtLogin adds qbox to the current user's Windows Run key.
+	// LaunchAtLogin registers qbox as a login item of the current user.
 	LaunchAtLogin bool `json:"launch_at_login,omitempty"`
 	// AutoConnect connects when qbox starts.
 	AutoConnect bool `json:"auto_connect,omitempty"`
@@ -194,7 +205,7 @@ func Defaults() Config {
 			Enabled:       true,
 			InterfaceName: "qbox",
 			Stack:         StackMixed,
-			MTU:           9000,
+			MTU:           DefaultMTU,
 			StrictRoute:   true,
 		},
 		Proxy: Proxy{
@@ -312,14 +323,14 @@ func (c *Config) Normalize() {
 	default:
 		c.TUN.Stack = def.TUN.Stack
 	}
-	minMTU := 576
+	minMTU := MinMTU
 	if !c.TUN.DisableIPv6 {
-		minMTU = 1280
+		minMTU = MinMTUIPv6
 	}
-	if c.TUN.MTU < minMTU || c.TUN.MTU > 65535 {
+	if c.TUN.MTU < minMTU || c.TUN.MTU > MaxMTU {
 		c.TUN.MTU = def.TUN.MTU
 	}
-	if c.Proxy.Port != 0 && (c.Proxy.Port < 1024 || c.Proxy.Port > 65535) {
+	if c.Proxy.Port != 0 && (c.Proxy.Port < MinProxyPort || c.Proxy.Port > MaxPort) {
 		c.Proxy.Port = DefaultProxyPort
 	}
 	switch c.Appearance.Theme {

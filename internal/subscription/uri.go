@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"qbox/internal/config"
 )
 
 func parseURI(line string) (map[string]any, error) {
@@ -554,7 +556,7 @@ func hostPort(u *url.URL, defaultPort int) (string, int, error) {
 	port := defaultPort
 	if p := u.Port(); p != "" {
 		n, err := strconv.Atoi(p)
-		if err != nil || n <= 0 || n > 65535 {
+		if err != nil || n <= 0 || n > config.MaxPort {
 			return "", 0, fmt.Errorf("некорректный порт %q", p)
 		}
 		port = n
@@ -566,7 +568,7 @@ func splitHostPort(hostport string, defaultPort int) (string, int, error) {
 	hostport = strings.TrimSpace(strings.TrimSuffix(hostport, "/"))
 	if host, port, err := net.SplitHostPort(hostport); err == nil {
 		n, convErr := strconv.Atoi(port)
-		if convErr != nil || n <= 0 || n > 65535 {
+		if convErr != nil || n <= 0 || n > config.MaxPort {
 			return "", 0, fmt.Errorf("некорректный порт %q", port)
 		}
 		return strings.Trim(host, "[]"), n, nil

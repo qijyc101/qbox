@@ -2,7 +2,7 @@ package app
 
 import "github.com/egoist/mygo"
 
-// LoginItem registers qbox to start when the user logs in to Windows.
+// LoginItem registers qbox to start when the user logs in.
 type LoginItem interface {
 	Set(enabled bool) error
 }
@@ -25,9 +25,9 @@ func (a *App) setLaunchAtLogin(enabled bool) {
 	a.cfg.Startup.LaunchAtLogin = enabled
 	a.err = ""
 	if enabled {
-		a.notice = "qbox будет запускаться при входе в Windows"
+		a.notice = "qbox будет запускаться при входе в систему"
 	} else {
-		a.notice = "qbox больше не запускается при входе в Windows"
+		a.notice = "qbox больше не запускается при входе в систему"
 	}
 	a.scheduleSave()
 	a.invalidate()

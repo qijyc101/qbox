@@ -60,24 +60,3 @@ func mustMenuIcon(svg *ui.SVG) *mygo.MenuIcon {
 	}
 	return icon
 }
-
-func textButton(c *ui.Context, label string, primary bool) ui.Element {
-	if primary {
-		return ui.PrimaryButton(c, label)
-	}
-	return ui.Button(c, label)
-}
-
-func iconButton(c *ui.Context, label string, svg *ui.SVG, primary bool) ui.Element {
-	var button ui.Element
-	if primary {
-		button = ui.PrimaryButton(c, "")
-	} else {
-		button = ui.Button(c, "")
-	}
-	button.Gap(7).Label(label).Children(func() {
-		ui.Icon(c, svg).Size(14, 14)
-		ui.Text(c, label).FontSize(13)
-	})
-	return button
-}

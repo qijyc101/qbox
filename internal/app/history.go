@@ -6,7 +6,10 @@ import (
 	"qbox/internal/model"
 )
 
-const trafficPoints = 60
+const (
+	trafficPoints       = 60
+	trafficSamplePeriod = 900 * time.Millisecond
+)
 
 type trafficPoint struct {
 	Up   int64
@@ -21,7 +24,7 @@ func (a *App) sampleTraffic(now time.Time, stats model.Stats) bool {
 		return false
 	}
 	elapsed := now.Sub(a.lastSample)
-	if elapsed < 900*time.Millisecond {
+	if elapsed < trafficSamplePeriod {
 		return false
 	}
 	up := stats.Up - a.lastStats.Up

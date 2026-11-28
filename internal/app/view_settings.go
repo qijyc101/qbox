@@ -1,6 +1,8 @@
 package app
 
 import (
+	"fmt"
+
 	"github.com/egoist/mygo/ui"
 
 	"qbox/internal/config"
@@ -8,25 +10,25 @@ import (
 )
 
 func (a *App) settingsPage(c *ui.Context, d design) {
-	t := d.T
-	ui.Column(c).Grow(1).Background(t.Background).Children(func() {
-		ui.Row(c).Padding(12, 12, 4, 12).Gap(10).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "Настройки").FontSize(20).Bold()
-			ui.Text(c, "").Grow(1)
-			if a.dirty && a.state == model.StateRunning {
-				iconButton(c, "Применить и перезапустить", iconRotateCW, true).OnClick(a.restartNow)
+	ui.Column(c).Grow(1).Background(d.T.Background).Children(func() {
+		ui.Row(c).Padding(spaceXL, spaceXL, spaceXS, spaceXL).Gap(spaceL).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, "Настройки").FontSize(fontSizePageTitle).Bold()
+			ui.Spacer(c)
+			if a.needsRestart() {
+				a.restartButton(c, "Применить и перезапустить")
 			}
 		})
-		ui.Scroll(c).Grow(1).Background(t.Background).Padding(12, 12, 16, 12).Gap(12).Children(func() {
-			a.settingsCard(c, d, iconPalette, "Внешний вид", func() {
+		ui.Scroll(c).Grow(1).Background(d.T.Background).
+			Padding(spaceXL, spaceXL, space2XL, spaceXL).Gap(spaceXL).Children(func() {
+			baseCard(c, d, iconPalette, "Внешний вид", func() {
 				a.themeRow(c, d)
 				a.accentRow(c, d)
 				a.cornersRow(c, d)
 			})
-			a.settingsCard(c, d, iconNetwork, "Подключение", func() {
+			baseCard(c, d, iconNetwork, "Подключение", func() {
 				tun := a.cfg.TUN.Enabled
-				a.settingsSwitch(c, d, "Режим TUN",
-					"TUN перехватывает весь трафик и требует прав администратора. Без TUN qbox использует системный прокси Windows.",
+				switchRow(c, d, "Режим TUN",
+					"TUN перехватывает весь трафик и требует прав администратора. Без TUN qbox использует системный прокси.",
 					&tun, func() { a.setTUNEnabled(tun) })
 				if a.cfg.TUN.Enabled {
 					a.tunSettings(c, d)
@@ -35,75 +37,50 @@ func (a *App) settingsPage(c *ui.Context, d design) {
 				}
 				a.dnsSettings(c, d)
 			})
-			a.settingsCard(c, d, iconPower, "Запуск", func() {
+			baseCard(c, d, iconPower, "Запуск", func() {
 				launch := a.cfg.Startup.LaunchAtLogin
-				a.settingsSwitch(c, d, "Запускать qbox при входе в Windows",
+				switchRow(c, d, "Запускать qbox при входе в систему",
 					"Добавляет qbox в автозапуск текущего пользователя.",
 					&launch, func() { a.setLaunchAtLogin(launch) })
 				connect := a.cfg.Startup.AutoConnect
-				a.settingsSwitch(c, d, "Подключаться при запуске qbox",
-					"Сразу запускает выбранную ноду после открытия. Для TUN Windows запросит права администратора.",
+				switchRow(c, d, "Подключаться при запуске qbox",
+					"Сразу запускает выбранную ноду после открытия. Для TUN потребуются права администратора.",
 					&connect, func() { a.setAutoConnect(connect) })
 			})
-			a.settingsCard(c, d, iconActivity, "Пинг", func() {
+			baseCard(c, d, iconActivity, "Пинг", func() {
 				auto := a.cfg.Ping.Auto
-				a.settingsSwitch(c, d, "Автоматический пинг",
-					"Каждые 30 секунд, пока qbox запущен.",
+				switchRow(c, d, "Автоматический пинг",
+					fmt.Sprintf("Каждые %d секунд, пока qbox запущен.", int(autoPingInterval.Seconds())),
 					&auto, func() { a.setAutoPing(auto) })
 				last := "ещё не выполнялся"
 				if !a.lastPingAt.IsZero() {
-					last = a.lastPingAt.Format("02.01.2006 15:04:05")
+					last = a.lastPingAt.Format(dateTimeLayout)
 				}
-				ui.Text(c, "Последний пинг: "+last).FontSize(11).TextColor(t.TextMuted)
+				hintText(c, d, "Последний пинг: "+last)
 			})
-			a.settingsCard(c, d, iconScrollText, "Журнал", func() {
+			baseCard(c, d, iconScrollText, "Журнал", func() {
 				level := a.logLevelIndex()
-				ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
-					ui.Column(c).Gap(2).Grow(1).Children(func() {
+				ui.Row(c).Gap(spaceXL).AlignItems(ui.Center).Children(func() {
+					ui.Column(c).Gap(spaceXXS).Grow(1).Children(func() {
 						ui.Text(c, "Уровень логирования")
-						ui.Text(c, "Подробные уровни нужны только для диагностики.").FontSize(11).TextColor(t.TextMuted)
+						hintText(c, d, "Подробные уровни нужны только для диагностики.")
 					})
 					ui.Segmented(c, &level, "Info", "Debug", "Trace").OnChange(func() {
 						a.setLogLevel(level)
 					})
 				})
 			})
-			a.settingsCard(c, d, iconInfo, "О программе", func() {
-				ui.Text(c, "qbox · GPLv3 · sing-box v1.14.4 · MyGo").FontSize(11).TextColor(t.TextMuted)
+			baseCard(c, d, iconInfo, "О программе", func() {
+				hintText(c, d, "qbox · GPLv3 · sing-box v1.14.4 · MyGo")
 			})
-			if a.dirty && a.state == model.StateRunning {
-				ui.Text(c, "Есть изменения, которые вступят в силу после перезапуска подключения.").
-					FontSize(11).TextColor(t.Warning).Padding(0, 2)
-			}
+			a.restartHint(c, d)
 		})
-	})
-}
-
-func (a *App) settingsCard(c *ui.Context, d design, icon *ui.SVG, title string, build func()) {
-	ui.Column(c).FillWidth().Padding(14).Gap(10).Background(d.T.Surface).Radius(d.RadiusL).Border(1, d.T.Border).Children(func() {
-		ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-			ui.Icon(c, icon).Size(13, 13).TextColor(d.T.TextMuted)
-			ui.Text(c, title).FontSize(11).Bold().TextColor(d.T.TextMuted)
-		})
-		build()
-	})
-}
-
-func (a *App) settingsSwitch(c *ui.Context, d design, title, hint string, value *bool, onChange func()) {
-	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
-		ui.Column(c).Gap(2).Grow(1).Children(func() {
-			ui.Text(c, title)
-			if hint != "" {
-				ui.Text(c, hint).FontSize(11).TextColor(d.T.TextMuted).Wrap()
-			}
-		})
-		ui.Switch(c, value).Label(title).OnChange(onChange)
 	})
 }
 
 func (a *App) themeRow(c *ui.Context, d design) {
 	theme := a.themeIndex()
-	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
+	ui.Row(c).Gap(spaceXL).AlignItems(ui.Center).Children(func() {
 		ui.Text(c, "Тема").Grow(1)
 		ui.Segmented(c, &theme, "Системная", "Светлая", "Тёмная").OnChange(func() {
 			a.setThemeIndex(theme)
@@ -112,24 +89,23 @@ func (a *App) themeRow(c *ui.Context, d design) {
 }
 
 func (a *App) accentRow(c *ui.Context, d design) {
-	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
+	ui.Row(c).Gap(spaceXL).AlignItems(ui.Center).Children(func() {
 		ui.Text(c, "Акцент").Grow(1)
-		ui.Row(c).Gap(6).Children(func() {
+		ui.Row(c).Gap(spaceS).Children(func() {
 			for _, def := range accentDefs {
 				selected := a.cfg.Appearance.Accent == def.Name
-				swatch := ui.ButtonBase(c).Size(26, 26).Radius(13).Background(accentColor(def.Name, d.T.Dark)).Center().
+				swatch := ui.ButtonBase(c).Size(menuButtonSize, menuButtonSize).Radius(menuButtonSize / 2).
+					Background(accentColor(def.Name, d.T.Dark)).Center().
 					Label(def.Label).Tooltip(def.Label)
 				if selected {
-					swatch.Border(2, d.T.Text)
+					swatch.Border(selectionBorder, d.T.Text)
 				}
 				swatch.Children(func() {
 					if selected {
-						ui.Icon(c, iconCheck).Size(11, 11).TextColor(ui.Hex("#ffffff"))
+						ui.Icon(c, iconCheck).Size(iconSizeS, iconSizeS).TextColor(ui.Hex(colorWhite))
 					}
 				})
-				if swatch.Clicked() {
-					a.setAccent(def.Name)
-				}
+				swatch.OnClick(func() { a.setAccent(def.Name) })
 			}
 		})
 	})
@@ -137,7 +113,7 @@ func (a *App) accentRow(c *ui.Context, d design) {
 
 func (a *App) cornersRow(c *ui.Context, d design) {
 	corners := a.cornersIndex()
-	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
+	ui.Row(c).Gap(spaceXL).AlignItems(ui.Center).Children(func() {
 		ui.Text(c, "Скругления").Grow(1)
 		ui.Segmented(c, &corners, "Компактные", "Мягкие", "Крупные").OnChange(func() {
 			a.setCornersIndex(corners)
@@ -146,78 +122,72 @@ func (a *App) cornersRow(c *ui.Context, d design) {
 }
 
 func (a *App) tunSettings(c *ui.Context, d design) {
-	t := d.T
-	ui.Box(c).Height(1).Background(t.Border)
+	ui.Box(c).Height(dividerSize).Background(d.T.Border)
 	stack := a.stackIndex()
-	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
-		ui.Column(c).Gap(2).Grow(1).Children(func() {
+	ui.Row(c).Gap(spaceXL).AlignItems(ui.Center).Children(func() {
+		ui.Column(c).Gap(spaceXXS).Grow(1).Children(func() {
 			ui.Text(c, "Стек")
-			ui.Text(c, "Mixed требует сборки с with_gvisor; System быстрее, gVisor универсальнее.").FontSize(11).TextColor(t.TextMuted).Wrap()
+			hintText(c, d, "Mixed требует сборки с with_gvisor; System быстрее, gVisor универсальнее.")
 		})
 		ui.Segmented(c, &stack, "System", "Mixed", "gVisor").OnChange(func() {
 			a.setStack(stack)
 		})
 	})
-	ui.Text(c, "Имя интерфейса").FontSize(11).TextColor(t.TextMuted)
-	ui.TextInput(c, &a.cfg.TUN.InterfaceName).Label("Имя интерфейса").OnChange(a.connectionSettingsChanged)
-	ui.Text(c, "MTU").FontSize(11).TextColor(t.TextMuted)
+	fieldLabel(c, d, "Имя интерфейса")
+	ui.TextInput(c, &a.cfg.TUN.InterfaceName).Label("Имя интерфейса").
+		OnChange(a.connectionSettingsChanged)
+	fieldLabel(c, d, "MTU")
 	mtu := float64(a.cfg.TUN.MTU)
-	if ui.NumberInput(c, &mtu, 576, 65535, 1).Label("MTU").Changed() {
+	if ui.NumberInput(c, &mtu, config.MinMTU, config.MaxMTU, numberStep).Label("MTU").Changed() {
 		a.setMTU(int(mtu))
 	}
-	a.settingsSwitch(c, d, "Strict route",
+	switchRow(c, d, "Strict route",
 		"Блокирует утечки DNS и обход TUN. Может ломать отдельные приложения.",
 		&a.cfg.TUN.StrictRoute, a.connectionSettingsChanged)
-	a.settingsSwitch(c, d, "Отключить IPv6 в TUN",
-		"Включайте, если Windows не может назначить IPv6-адрес TUN-интерфейсу.",
+	switchRow(c, d, "Отключить IPv6 в TUN",
+		"Включайте, если система не может назначить IPv6-адрес TUN-интерфейсу.",
 		&a.cfg.TUN.DisableIPv6, a.connectionSettingsChanged)
 	if a.cfg.DNS.UseProxy && !a.cfg.TUN.StrictRoute && !a.cfg.TUN.DisableIPv6 && a.cfg.Routing.Mode != config.ModeDirect {
-		ui.Text(c, "Strict route выключен: Windows может использовать DNS физических адаптеров в обход туннеля.").
-			FontSize(11).TextColor(t.Warning).Wrap()
+		warningText(c, d, "Strict route выключен: система может использовать DNS физических адаптеров в обход туннеля.")
 	}
 	if !a.elevated() {
-		ui.Text(c, "При включении TUN Windows запросит права администратора.").FontSize(11).TextColor(t.TextMuted)
+		hintText(c, d, "При включении TUN система запросит права администратора.")
 	}
 }
 
 func (a *App) proxySettings(c *ui.Context, d design) {
-	t := d.T
-	ui.Box(c).Height(1).Background(t.Border)
-	ui.Text(c, "Порт прокси").FontSize(11).TextColor(t.TextMuted)
+	ui.Box(c).Height(dividerSize).Background(d.T.Border)
+	fieldLabel(c, d, "Порт прокси")
 	port := float64(a.cfg.Proxy.Port)
-	if ui.NumberInput(c, &port, 0, 65535, 1).Label("Порт прокси").Changed() {
+	if ui.NumberInput(c, &port, 0, config.MaxPort, numberStep).Label("Порт прокси").Changed() {
 		a.setProxyPort(int(port))
 	}
-	ui.Text(c, "0 — выбрать свободный порт автоматически.").FontSize(11).TextColor(t.TextMuted)
+	hintText(c, d, "0 — выбрать свободный порт автоматически.")
 	address := a.proxyAddr
 	if address == "" {
 		address = "будет выбран при запуске"
 	}
-	ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, "Локальный прокси: "+address).FontSize(12).Grow(1)
+	ui.Row(c).Gap(spaceM).AlignItems(ui.Center).Children(func() {
+		ui.Text(c, "Локальный прокси: "+address).FontSize(fontSizeBody).Grow(1)
 		if a.proxyAddr != "" {
 			iconButton(c, "Копировать", iconCopy, false).OnClick(func() { a.copyText(a.proxyAddr) })
 		}
 	})
-	ui.Text(c, "Системный прокси видят не все приложения: QUIC, игры и программы со своим DNS могут обойти его. "+
-		"Корпоративные домены, которые приложение резолвит само, могут не работать. Для полного перехвата включите TUN.").
-		FontSize(11).TextColor(t.Warning).Wrap()
+	warningText(c, d, "Системный прокси видят не все приложения: QUIC, игры и программы со своим DNS могут обойти его. "+
+		"Корпоративные домены, которые приложение резолвит само, могут не работать. Для полного перехвата включите TUN.")
 	if a.state == model.StateRunning && !a.cfg.TUN.Enabled && a.proxyAddr == "" {
-		ui.Text(c, "Прокси ещё не включён: перезапустите подключение.").FontSize(11).TextColor(t.TextMuted)
+		hintText(c, d, "Прокси ещё не включён: перезапустите подключение.")
 	}
 }
 
 func (a *App) dnsSettings(c *ui.Context, d design) {
-	t := d.T
-	ui.Box(c).Height(1).Background(t.Border)
-	ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-		ui.Icon(c, iconGlobe).Size(13, 13).TextColor(t.TextMuted)
-		ui.Text(c, "DNS").FontSize(13).Bold()
+	ui.Box(c).Height(dividerSize).Background(d.T.Border)
+	ui.Row(c).Gap(spaceS).AlignItems(ui.Center).Children(func() {
+		ui.Icon(c, iconGlobe).Size(iconSizeL, iconSizeL).TextColor(d.T.TextMuted)
+		ui.Text(c, "DNS").FontSize(fontSizeLabel).Bold()
 	})
-	ui.Text(c, "DoH/DoT сервер").FontSize(11).TextColor(t.TextMuted)
-	ui.TextInput(c, &a.cfg.DNS.Remote).Label("DoH/DoT сервер").Placeholder("https://1.1.1.1/dns-query").
-		OnChange(a.connectionSettingsChanged)
-	a.settingsSwitch(c, d, "DNS через прокси",
+	baseInput(c, d, "DoH/DoT сервер", "https://1.1.1.1/dns-query", &a.cfg.DNS.Remote, a.connectionSettingsChanged)
+	switchRow(c, d, "DNS через прокси",
 		"В режиме Direct используется системный DNS. Direct-домены всегда резолвятся системным сервером.",
 		&a.cfg.DNS.UseProxy, a.connectionSettingsChanged)
 }

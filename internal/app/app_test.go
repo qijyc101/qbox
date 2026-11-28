@@ -238,7 +238,6 @@ func newApp(t *testing.T, cfg config.Config, eng *fakeEngine, fetch Fetcher) *Ap
 		Fetcher:    fetch,
 		RuleSets:   &fakeRules{paths: map[string]string{}},
 		ConfigPath: store.Path(),
-		CacheDir:   t.TempDir(),
 		LoginItem:  &fakeLoginItem{},
 		Elevated:   func() bool { return true },
 	})
@@ -432,6 +431,26 @@ func TestRoutingProfileSelectUI(t *testing.T) {
 	tt.Frame()
 	if a.activeRoutingProfileName() != "Основной" {
 		t.Fatalf("active profile = %q", a.activeRoutingProfileName())
+	}
+}
+
+func TestSetMTUHonorsIPv6Minimum(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	a := newApp(t, cfg, &fakeEngine{state: model.StateStopped}, fakeFetcher{})
+
+	a.setMTU(1000)
+	if a.cfg.TUN.MTU != config.DefaultMTU {
+		t.Fatalf("IPv6 MTU below 1280 was accepted: %d", a.cfg.TUN.MTU)
+	}
+	a.setMTU(config.MinMTUIPv6)
+	if a.cfg.TUN.MTU != config.MinMTUIPv6 {
+		t.Fatalf("valid IPv6 MTU was rejected: %d", a.cfg.TUN.MTU)
+	}
+
+	a.cfg.TUN.DisableIPv6 = true
+	a.setMTU(config.MinMTU)
+	if a.cfg.TUN.MTU != config.MinMTU {
+		t.Fatalf("IPv4-only MTU was rejected: %d", a.cfg.TUN.MTU)
 	}
 }
 
@@ -786,6 +805,19 @@ func TestSubscriptionURLHidden(t *testing.T) {
 	}
 }
 
+func TestSubscriptionMenu(t *testing.T) {
+	cfg := testConfig(t, testNode(t, testVLESS))
+	a := newApp(t, cfg, &fakeEngine{state: model.StateStopped}, fakeFetcher{})
+	tt := ui.NewTester(a.view, 1100, 760)
+	if err := tt.Click("Меню подписки"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if !tt.HasText("Обновить") || !tt.HasText("Переименовать…") || !tt.HasText("Удалить…") {
+		t.Fatalf("subscription menu = %q", tt.Texts())
+	}
+}
+
 func TestAutoPing(t *testing.T) {
 	cfg := testConfig(t, testNode(t, testVLESS))
 	cfg.Ping.Auto = true
@@ -890,7 +922,7 @@ func TestStartupSettings(t *testing.T) {
 	a.settingsOpen = true
 	tt := ui.NewTester(a.view, 1120, 1500)
 	tt.Frame()
-	if !tt.HasText("Запускать qbox при входе в Windows") || !tt.HasText("Подключаться при запуске qbox") {
+	if !tt.HasText("Запускать qbox при входе в систему") || !tt.HasText("Подключаться при запуске qbox") {
 		t.Fatalf("startup settings = %q", tt.Texts())
 	}
 	a.settingsOpen = false

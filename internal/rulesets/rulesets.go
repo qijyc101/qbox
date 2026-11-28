@@ -31,22 +31,28 @@ type Item struct {
 	File  string
 }
 
+const (
+	TagGeositeRU  = "geosite-ru"
+	TagGeoIPRU    = "geoip-ru"
+	TagGeositeAds = "geosite-ads"
+)
+
 // Items are the rule-sets used by the routing settings.
 var Items = []Item{
 	{
-		Tag:   "geosite-ru",
+		Tag:   TagGeositeRU,
 		Title: "Домены РФ",
 		URL:   "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs",
 		File:  "geosite-category-ru.srs",
 	},
 	{
-		Tag:   "geoip-ru",
+		Tag:   TagGeoIPRU,
 		Title: "IP РФ",
 		URL:   "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs",
 		File:  "geoip-ru.srs",
 	},
 	{
-		Tag:   "geosite-ads",
+		Tag:   TagGeositeAds,
 		Title: "Реклама и трекеры",
 		URL:   "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs",
 		File:  "geosite-category-ads-all.srs",

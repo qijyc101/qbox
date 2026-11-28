@@ -13,6 +13,23 @@ import (
 	"qbox/internal/config"
 )
 
+const (
+	childWindowCornerRadius = 10
+
+	addSubscriptionWidth     = 480
+	addSubscriptionHeight    = 340
+	renameSubscriptionWidth  = 440
+	renameSubscriptionHeight = 230
+	deleteSubscriptionWidth  = 440
+	deleteSubscriptionHeight = 220
+	newProfileWidth          = 460
+	newProfileHeight         = 230
+	routingEditorWidth       = 700
+	routingEditorHeight      = 780
+	textViewerWidth          = 780
+	textViewerHeight         = 640
+)
+
 type childWindow string
 
 const (
@@ -75,7 +92,7 @@ func (a *App) openChild(key childWindow, options mygo.WindowOptions, view func(*
 	options.Parent = a.win
 	options.Content = ui.View(view)
 	options.Frameless = true
-	options.CornerRadius = 10
+	options.CornerRadius = childWindowCornerRadius
 	options.DisableResize = true
 	options.DisableMaximize = true
 	options.DisableFullScreen = true
@@ -161,8 +178,8 @@ func (a *App) openAddSubscription() {
 	a.err = ""
 	a.openChild(winAddSubscription, mygo.WindowOptions{
 		Title:  "Новая подписка",
-		Width:  480,
-		Height: 340,
+		Width:  addSubscriptionWidth,
+		Height: addSubscriptionHeight,
 		Modal:  true,
 	}, a.addSubscriptionView)
 	a.invalidate()
@@ -181,8 +198,8 @@ func (a *App) openRenameSubscription(id string) {
 	a.err = ""
 	a.openChild(winRenameSub, mygo.WindowOptions{
 		Title:  "Переименовать подписку",
-		Width:  440,
-		Height: 230,
+		Width:  renameSubscriptionWidth,
+		Height: renameSubscriptionHeight,
 		Modal:  true,
 	}, a.renameSubscriptionView)
 	a.invalidate()
@@ -199,8 +216,8 @@ func (a *App) openDeleteSubscription(id string) {
 	a.err = ""
 	a.openChild(winDeleteSub, mygo.WindowOptions{
 		Title:  "Удалить подписку",
-		Width:  440,
-		Height: 220,
+		Width:  deleteSubscriptionWidth,
+		Height: deleteSubscriptionHeight,
 		Modal:  true,
 	}, a.deleteSubscriptionView)
 	a.invalidate()
@@ -220,8 +237,8 @@ func (a *App) openNewProfile() {
 	a.err = ""
 	a.openChild(winNewProfile, mygo.WindowOptions{
 		Title:  "Новый профиль",
-		Width:  460,
-		Height: 230,
+		Width:  newProfileWidth,
+		Height: newProfileHeight,
 		Modal:  true,
 	}, a.newProfileView)
 	a.invalidate()
@@ -239,8 +256,8 @@ func (a *App) openProfileEditor() {
 	a.profileDeleteConfirm = false
 	a.openChild(winRouting, mygo.WindowOptions{
 		Title:  "Профиль " + profile.Name,
-		Width:  700,
-		Height: 780,
+		Width:  routingEditorWidth,
+		Height: routingEditorHeight,
 		Modal:  true,
 	}, a.routingEditorView)
 	a.invalidate()
@@ -264,8 +281,8 @@ func (a *App) openTextViewer(kind textViewer) {
 	a.viewers[kind] = &view
 	a.openChild(key, mygo.WindowOptions{
 		Title:  title,
-		Width:  780,
-		Height: 640,
+		Width:  textViewerWidth,
+		Height: textViewerHeight,
 	}, func(c *ui.Context) { a.textViewerView(c, kind) })
 }
 
@@ -273,7 +290,7 @@ func (a *App) loadTextViewer(kind textViewer) textView {
 	switch kind {
 	case viewerConfig:
 		path := a.deps.ConfigPath
-		data, err := readTail(path, 4<<20, 0)
+		data, err := readTail(path, configViewerLimit, 0)
 		view := textView{Title: "config.json", Path: path, Text: string(data)}
 		if err != nil {
 			view.Err = err.Error()
@@ -294,7 +311,7 @@ func (a *App) loadTextViewer(kind textViewer) textView {
 			return textView{Title: "Журнал qbox", Err: err.Error()}
 		}
 		path := filepath.Join(dir, "qbox.log")
-		data, err := readTail(path, 256<<10, 256<<10)
+		data, err := readTail(path, logViewerTail, logViewerTail)
 		view := textView{Title: "Журнал qbox", Path: path, Text: string(data)}
 		if err != nil {
 			view.Err = err.Error()

@@ -125,7 +125,7 @@ func parseSingBoxJSON(data []byte) ([]config.Node, []string, error) {
 			warnings = append(warnings, fmt.Sprintf("outbound %d (%s): тип не поддерживается", i+1, meta.Type))
 			continue
 		}
-		if meta.Server == "" || meta.ServerPort <= 0 || meta.ServerPort > 65535 {
+		if meta.Server == "" || meta.ServerPort <= 0 || meta.ServerPort > config.MaxPort {
 			warnings = append(warnings, fmt.Sprintf("outbound %d (%s): нет адреса или порта", i+1, meta.Type))
 			continue
 		}
@@ -206,7 +206,7 @@ func nodeFromMap(outbound map[string]any) (config.Node, error) {
 	if err != nil {
 		return config.Node{}, err
 	}
-	if port <= 0 || port > 65535 {
+	if port <= 0 || port > config.MaxPort {
 		return config.Node{}, fmt.Errorf("некорректный порт %d", port)
 	}
 	tag := cleanTag(stringValue(outbound["tag"]))

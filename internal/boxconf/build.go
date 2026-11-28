@@ -19,6 +19,18 @@ import (
 
 	"qbox/internal/config"
 	"qbox/internal/jsonutil"
+	"qbox/internal/rulesets"
+)
+
+const (
+	urlTestURL       = "https://www.gstatic.com/generate_204"
+	urlTestInterval  = "3m"
+	urlTestTolerance = 50
+
+	tunIPv4Address = "172.19.0.1/30"
+	tunIPv6Address = "fdfe:dcba:9876::1/126"
+	localProxyHost = "127.0.0.1"
+	dnsPort        = 53
 )
 
 // Input is everything the builder needs.
@@ -30,7 +42,7 @@ type Input struct {
 	// ProxyPort is the local mixed inbound port when TUN is disabled.
 	ProxyPort int
 	// DisableIPv6 forces an IPv4-only TUN interface. Used for the
-	// automatic retry when Windows refuses the IPv6 address.
+	// automatic retry when the system refuses the IPv6 address.
 	DisableIPv6 bool
 }
 
@@ -192,9 +204,9 @@ func Build(in Input) ([]byte, []string, error) {
 				"type":      "urltest",
 				"tag":       "auto",
 				"outbounds": nodeTags,
-				"url":       "https://www.gstatic.com/generate_204",
-				"interval":  "3m",
-				"tolerance": 50,
+				"url":       urlTestURL,
+				"interval":  urlTestInterval,
+				"tolerance": urlTestTolerance,
 			})
 			if err != nil {
 				return nil, warnings, err
@@ -227,8 +239,8 @@ func Build(in Input) ([]byte, []string, error) {
 		if len(directDomains) > 0 {
 			dnsRules = append(dnsRules, dnsRule{DomainSuffix: directDomains, Server: "local"})
 		}
-		if _, ok := usedRuleSets["geosite-ru"]; ok {
-			dnsRules = append(dnsRules, dnsRule{RuleSet: []string{"geosite-ru"}, Server: "local"})
+		if _, ok := usedRuleSets[rulesets.TagGeositeRU]; ok {
+			dnsRules = append(dnsRules, dnsRule{RuleSet: []string{rulesets.TagGeositeRU}, Server: "local"})
 		}
 	}
 
@@ -262,14 +274,14 @@ func Build(in Input) ([]byte, []string, error) {
 
 	var inbounds []inbound
 	if cfg.TUN.Enabled {
-		addresses := []string{"172.19.0.1/30"}
+		addresses := []string{tunIPv4Address}
 		if !disableIPv6 {
-			addresses = append(addresses, "fdfe:dcba:9876::1/126")
+			addresses = append(addresses, tunIPv6Address)
 		}
 		strictRoute := cfg.TUN.StrictRoute
 		if disableIPv6 && !strictRoute {
-			// Without an IPv6 address sing-tun installs no IPv6 route. On
-			// Windows strict_route also blocks IPv6 leaks through the physical
+			// Without an IPv6 address sing-tun installs no IPv6 route.
+			// strict_route also blocks IPv6 leaks through the physical
 			// interface, so force it for IPv4-only TUNs.
 			warnings = append(warnings, "IPv6 отключён: strict_route включён для блокировки IPv6-утечек")
 			strictRoute = true
@@ -286,13 +298,13 @@ func Build(in Input) ([]byte, []string, error) {
 			Stack:         cfg.TUN.Stack,
 		}}
 	} else {
-		if in.ProxyPort < 1 || in.ProxyPort > 65535 {
+		if in.ProxyPort < config.MinPort || in.ProxyPort > config.MaxPort {
 			return nil, warnings, fmt.Errorf("некорректный порт локального прокси: %d", in.ProxyPort)
 		}
 		inbounds = []inbound{{
 			Type:       "mixed",
 			Tag:        "mixed-in",
-			Listen:     "127.0.0.1",
+			Listen:     localProxyHost,
 			ListenPort: in.ProxyPort,
 		}}
 	}
@@ -354,7 +366,7 @@ func buildRemoteDNS(dns config.DNS, final string) (*dnsServer, string) {
 	}
 	if port := u.Port(); port != "" {
 		n, err := strconv.Atoi(port)
-		if err != nil || n <= 0 || n > 65535 {
+		if err != nil || n < config.MinPort || n > config.MaxPort {
 			return nil, "DNS-сервер: некорректный порт, используется системный DNS"
 		}
 		server.ServerPort = uint16(n)
@@ -387,7 +399,7 @@ func buildRemoteDNS(dns config.DNS, final string) (*dnsServer, string) {
 	case "udp":
 		server.Type = "udp"
 		if server.ServerPort == 0 {
-			server.ServerPort = 53
+			server.ServerPort = dnsPort
 		}
 	default:
 		return nil, fmt.Sprintf("DNS: схема %q не поддерживается, используется системный DNS", u.Scheme)
@@ -410,9 +422,9 @@ func buildRules(cfg config.Config, final, exeName string, ruleSetPaths map[strin
 	}
 
 	if cfg.Routing.BlockAds {
-		if path, ok := ruleSetPaths["geosite-ads"]; ok && path != "" {
-			used["geosite-ads"] = path
-			rules = append(rules, rule{Action: "reject", RuleSet: []string{"geosite-ads"}})
+		if path, ok := ruleSetPaths[rulesets.TagGeositeAds]; ok && path != "" {
+			used[rulesets.TagGeositeAds] = path
+			rules = append(rules, rule{Action: "reject", RuleSet: []string{rulesets.TagGeositeAds}})
 		} else {
 			warnings = append(warnings, "база рекламы не установлена: блокировка рекламы пропущена")
 		}
@@ -442,7 +454,7 @@ func buildRules(cfg config.Config, final, exeName string, ruleSetPaths map[strin
 
 	if cfg.Routing.BypassRU && rulesMode && final != "direct" {
 		var tags []string
-		for _, tag := range []string{"geosite-ru", "geoip-ru"} {
+		for _, tag := range []string{rulesets.TagGeositeRU, rulesets.TagGeoIPRU} {
 			if path, ok := ruleSetPaths[tag]; ok && path != "" {
 				tags = append(tags, tag)
 				used[tag] = path

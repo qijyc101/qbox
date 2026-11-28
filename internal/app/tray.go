@@ -20,7 +20,8 @@ func (a *App) initTray() {
 		return
 	}
 	pngConfig, err := png.DecodeConfig(bytes.NewReader(icon))
-	if err != nil || pngConfig.Width <= 0 || pngConfig.Height <= 0 || pngConfig.Width > 1024 || pngConfig.Height > 1024 {
+	if err != nil || pngConfig.Width <= 0 || pngConfig.Height <= 0 ||
+		pngConfig.Width > trayIconMaxDimension || pngConfig.Height > trayIconMaxDimension {
 		a.notice = "Трей недоступен: некорректный PNG"
 		return
 	}
@@ -71,20 +72,19 @@ func readTrayIcon(resourcesDir string) []byte {
 		filepath.Join("resources", "tray.png"),
 		filepath.Join("resources", "icon.png"),
 	)
-	const maxIconSize = 1 << 20
 	for _, path := range candidates {
 		file, err := os.Open(path)
 		if err != nil {
 			continue
 		}
 		info, err := file.Stat()
-		if err != nil || info.Size() <= 0 || info.Size() > maxIconSize {
+		if err != nil || info.Size() <= 0 || info.Size() > trayIconMaxBytes {
 			_ = file.Close()
 			continue
 		}
-		data, err := io.ReadAll(io.LimitReader(file, maxIconSize+1))
+		data, err := io.ReadAll(io.LimitReader(file, trayIconMaxBytes+1))
 		_ = file.Close()
-		if err == nil && len(data) > 0 && len(data) <= maxIconSize {
+		if err == nil && len(data) > 0 && len(data) <= trayIconMaxBytes {
 			return data
 		}
 	}

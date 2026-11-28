@@ -11,13 +11,117 @@ import (
 )
 
 const (
+	colorWhite = "#ffffff"
+	colorBlack = "#000000"
+
 	lightBackground  = "#f5f6f8"
 	darkBackground   = "#141416"
 	windowBackground = "light-dark(#f5f6f8, #141416)"
 
-	titleBarMinHeight  = 40
-	windowControlWidth = 40
-	windowCloseHover   = "#e81123"
+	lightSurface        = "#ffffff"
+	lightSurfaceHover   = "#eef0f4"
+	lightSurfacePressed = "#e4e7ed"
+	lightBorder         = "#e2e5ea"
+	lightText           = "#18181b"
+	lightTextMuted      = "#71717a"
+	lightDanger         = "#dc2626"
+	lightWarning        = "#d97706"
+	lightSuccess        = "#16a34a"
+
+	darkSurface        = "#1d1e21"
+	darkSurfaceHover   = "#26272b"
+	darkSurfacePressed = "#303136"
+	darkBorder         = "#2e3035"
+	darkText           = "#f4f4f5"
+	darkTextMuted      = "#9a9aa3"
+	darkDanger         = "#ff6369"
+	darkWarning        = "#fbbf24"
+	darkSuccess        = "#4ade80"
+
+	titleBarMinHeight  float32 = 40
+	windowControlWidth float32 = 40
+	dividerSize        float32 = 1
+	borderWidth        float32 = 1
+	selectionBorder    float32 = 2
+	chartMinSize       float32 = 2
+	numberStep         float64 = 1
+	windowCloseHover           = "#e81123"
+
+	mainWindowWidth        = 1120
+	mainWindowHeight       = 760
+	mainWindowMinWidth     = 1000
+	mainWindowMinHeight    = 600
+	mainWindowCornerRadius = 12
+
+	trayIconMaxDimension = 1024
+	trayIconMaxBytes     = 1 << 20
+	configViewerLimit    = 4 << 20
+	logViewerTail        = 256 << 10
+
+	accentTintAlpha  float32 = 0.10
+	accentHoverMix   float32 = 0.10
+	accentPressedMix float32 = 0.18
+	selectionAlpha   float32 = 0.30
+	mutedTintAlpha   float32 = 0.18
+	chartGridAlpha   float32 = 0.55
+	chartDownLine    float32 = 1.6
+	chartUpLine      float32 = 1.2
+
+	spaceXXS float32 = 2
+	spaceXS  float32 = 4
+	spaceS   float32 = 6
+	spaceM   float32 = 8
+	spaceL   float32 = 10
+	spaceXL  float32 = 12
+	space2XL float32 = 16
+	space3XL float32 = 20
+
+	fontSizeCaption     float32 = 10
+	fontSizeSmall       float32 = 11
+	fontSizeBody        float32 = 12
+	fontSizeLabel       float32 = 13
+	fontSizeAvatar      float32 = 14
+	fontSizeEmptyTitle  float32 = 15
+	fontSizeDialogTitle float32 = 18
+	fontSizePageTitle   float32 = 20
+
+	iconLabelGap  float32 = 7
+	iconSizeXS    float32 = 10
+	iconSizeS     float32 = 11
+	iconSizeM     float32 = 12
+	iconSizeL     float32 = 13
+	iconSizeXL    float32 = 14
+	iconSize2XL   float32 = 15
+	iconSizeEmpty float32 = 24
+
+	sidebarWidth      float32 = 270
+	contentPadding    float32 = 12
+	cardPadding       float32 = 14
+	cardGap           float32 = 10
+	dialogPadding     float32 = 14
+	dialogGap         float32 = 10
+	trafficCardHeight float32 = 170
+	trafficChartPad   float32 = 4
+	trafficGridLines  int     = 4
+	trafficMinScale   float64 = 1024
+	trafficHeadroom   float64 = 1.12
+	logLevelWidth     float32 = 48
+
+	avatarSize          float32 = 32
+	statusDotSize       float32 = 6
+	activityDotSize     float32 = 7
+	statusDotRadius     float32 = 3
+	activityDotRadius   float32 = 4
+	nodeAccentWidth     float32 = 3
+	nodeAccentHeight    float32 = 24
+	closeButtonSize     float32 = 28
+	smallIconButtonSize float32 = 22
+	menuButtonSize      float32 = 26
+
+	dateTimeLayout = "02.01.2006 15:04:05"
+	dateLayout     = "2006-01-02"
+	clockLayout    = "15:04:05"
+	monoFont       = "Consolas"
 )
 
 // design carries the theme and the design tokens of a frame.
@@ -28,12 +132,6 @@ type design struct {
 	RadiusS  float32
 	RadiusM  float32
 	RadiusL  float32
-
-	Space1 float32
-	Space2 float32
-	Space3 float32
-	Space4 float32
-	Space5 float32
 }
 
 type accentDef struct {
@@ -84,43 +182,43 @@ func (a *App) designFor(c *ui.Context) design {
 	accent := accentColor(a.cfg.Appearance.Accent, dark)
 	if dark {
 		t.Background = ui.Hex(darkBackground)
-		t.Surface = ui.Hex("#1d1e21")
-		t.SurfaceHover = ui.Hex("#26272b")
-		t.SurfacePressed = ui.Hex("#303136")
-		t.Border = ui.Hex("#2e3035")
-		t.Text = ui.Hex("#f4f4f5")
-		t.TextMuted = ui.Hex("#9a9aa3")
-		t.Danger = ui.Hex("#ff6369")
-		t.Warning = ui.Hex("#fbbf24")
-		t.Success = ui.Hex("#4ade80")
+		t.Surface = ui.Hex(darkSurface)
+		t.SurfaceHover = ui.Hex(darkSurfaceHover)
+		t.SurfacePressed = ui.Hex(darkSurfacePressed)
+		t.Border = ui.Hex(darkBorder)
+		t.Text = ui.Hex(darkText)
+		t.TextMuted = ui.Hex(darkTextMuted)
+		t.Danger = ui.Hex(darkDanger)
+		t.Warning = ui.Hex(darkWarning)
+		t.Success = ui.Hex(darkSuccess)
 	} else {
 		t.Background = ui.Hex(lightBackground)
-		t.Surface = ui.Hex("#ffffff")
-		t.SurfaceHover = ui.Hex("#eef0f4")
-		t.SurfacePressed = ui.Hex("#e4e7ed")
-		t.Border = ui.Hex("#e2e5ea")
-		t.Text = ui.Hex("#18181b")
-		t.TextMuted = ui.Hex("#71717a")
-		t.Danger = ui.Hex("#dc2626")
-		t.Warning = ui.Hex("#d97706")
-		t.Success = ui.Hex("#16a34a")
+		t.Surface = ui.Hex(lightSurface)
+		t.SurfaceHover = ui.Hex(lightSurfaceHover)
+		t.SurfacePressed = ui.Hex(lightSurfacePressed)
+		t.Border = ui.Hex(lightBorder)
+		t.Text = ui.Hex(lightText)
+		t.TextMuted = ui.Hex(lightTextMuted)
+		t.Danger = ui.Hex(lightDanger)
+		t.Warning = ui.Hex(lightWarning)
+		t.Success = ui.Hex(lightSuccess)
 	}
 	t.Dark = dark
 	t.Accent = accent
-	t.AccentText = ui.Hex("#ffffff")
-	mix := ui.Hex("#000000")
+	t.AccentText = ui.Hex(colorWhite)
+	mix := ui.Hex(colorBlack)
 	if dark {
-		mix = ui.Hex("#ffffff")
+		mix = ui.Hex(colorWhite)
 	}
-	t.AccentHover = accent.Mix(mix, 0.10)
-	t.AccentPressed = accent.Mix(mix, 0.18)
+	t.AccentHover = accent.Mix(mix, accentHoverMix)
+	t.AccentPressed = accent.Mix(mix, accentPressedMix)
 	t.InactiveAccent = accent
-	t.Selection = accent.Alpha(0.30)
+	t.Selection = accent.Alpha(selectionAlpha)
 	t.Focus = accent
-	t.FocusRingWidth = 2
-	t.FocusRingOffset = 1
-	t.Spacing = 4
-	t.FontSize = 13
+	t.FocusRingWidth = spaceXXS
+	t.FocusRingOffset = dividerSize
+	t.Spacing = spaceXS
+	t.FontSize = fontSizeLabel
 	radii := a.radiusPreset()
 	t.Radius = radii.S
 	t.Scrollbar = t.TextMuted.Alpha(0.35)
@@ -131,11 +229,6 @@ func (a *App) designFor(c *ui.Context) design {
 		RadiusS:  radii.S,
 		RadiusM:  radii.M,
 		RadiusL:  radii.L,
-		Space1:   4,
-		Space2:   8,
-		Space3:   12,
-		Space4:   16,
-		Space5:   24,
 	}
 }
 
